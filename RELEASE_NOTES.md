@@ -1,3 +1,5 @@
+**1.2**: Save the patched video (Save to Files…, Save to Photos, Share / AirDrop). "Upload in TikTok Studio" now puts the video in TikTok's upload box by itself (also the film button in the TikTok tab); if TikTok's page changes and that fails, the app says so and you pick it from Files.
+
 **1.1**: TikTok Studio no longer shows "download in App Store": in desktop mode the app now presents itself as Safari on a Mac (Mac user agent, no touch, desktop-size screen, 1280 px layout).
 
 **TikTokHD.ipa**: the iPhone app. Install it with Sideloadly on Windows (free Apple ID; install again every 7 days).

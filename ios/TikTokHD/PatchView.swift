@@ -1,3 +1,4 @@
+import Photos
 import PhotosUI
 import SwiftUI
 import UniformTypeIdentifiers
@@ -66,11 +67,14 @@ final class PatchModel: ObservableObject {
 }
 
 struct PatchView: View {
-    var openStudio: () -> Void
+    /// Opens TikTok Studio and puts this video in its upload box.
+    var openStudio: (URL?) -> Void
     @StateObject private var model = PatchModel()
     @State private var showPhotos = false
     @State private var showFiles = false
     @State private var share: URL?
+    @State private var exportFile: URL?
+    @State private var saveNote: String?
 
     var body: some View {
         NavigationStack {
@@ -110,24 +114,41 @@ struct PatchView: View {
                         Text("Original → patched")
                     }
                     Section {
-                        Button { openStudio() } label: {
+                        Button { exportFile = r.file } label: { Label("Save to Files…", systemImage: "folder.badge.plus") }
+                        Button { saveToPhotos(r.file) } label: { Label("Save to Photos", systemImage: "photo.badge.plus") }
+                        Button { share = r.file } label: { Label("Share / AirDrop…", systemImage: "square.and.arrow.up") }
+                        if let n = saveNote { Text(n).font(.footnote).foregroundStyle(.secondary) }
+                    } header: {
+                        Text("2 · Save")
+                    } footer: {
+                        Text("It's also kept in Files → On My iPhone → TikTok HD.")
+                    }
+                    Section {
+                        Button { openStudio(r.file) } label: {
                             Label("Upload in TikTok Studio", systemImage: "arrow.up.circle.fill").bold()
                         }
                     } header: {
-                        Text("2 · Upload")
+                        Text("3 · Upload")
                     } footer: {
-                        Text("In TikTok Studio tap Select video → Choose File → Browse → On My iPhone → TikTok HD, and pick \(r.file.lastPathComponent). Don't pick it from Photos (iOS would compress it). Don't trim it in TikTok. First time, post as Only me to check.")
+                        Text("Opens TikTok Studio and puts \(r.file.lastPathComponent) in its upload box by itself. If it can't, tap Select video → Choose File → Browse → On My iPhone → TikTok HD. Don't pick it from Photos (iOS would compress it). Don't trim it in TikTok. First time, post as Only me to check.")
                     }
                 }
 
                 if !model.files.isEmpty {
                     Section("Patched videos") {
                         ForEach(model.files, id: \.self) { u in
-                            Text(u.lastPathComponent).font(.footnote)
-                                .swipeActions {
-                                    Button(role: .destructive) { model.delete(u) } label: { Label("Delete", systemImage: "trash") }
-                                    Button { share = u } label: { Label("Share", systemImage: "square.and.arrow.up") }
-                                }
+                            Menu {
+                                Button { openStudio(u) } label: { Label("Upload in TikTok Studio", systemImage: "arrow.up.circle") }
+                                Button { exportFile = u } label: { Label("Save to Files…", systemImage: "folder.badge.plus") }
+                                Button { saveToPhotos(u) } label: { Label("Save to Photos", systemImage: "photo.badge.plus") }
+                                Button { share = u } label: { Label("Share / AirDrop…", systemImage: "square.and.arrow.up") }
+                                Button(role: .destructive) { model.delete(u) } label: { Label("Delete", systemImage: "trash") }
+                            } label: {
+                                Text(u.lastPathComponent).font(.footnote).foregroundStyle(.primary)
+                            }
+                            .swipeActions {
+                                Button(role: .destructive) { model.delete(u) } label: { Label("Delete", systemImage: "trash") }
+                            }
                         }
                     }
                 }
@@ -155,6 +176,30 @@ struct PatchView: View {
             }
         }
         .sheet(item: $share) { u in ShareSheet(items: [u]) }
+        .sheet(item: $exportFile) { u in FileExporter(url: u).ignoresSafeArea() }
+    }
+
+    /// Adds the file to Photos as it is (no conversion). For uploading, pick it
+    /// from Files, not Photos: Safari-style pickers compress Photos videos.
+    private func saveToPhotos(_ u: URL) {
+        saveNote = "Saving to Photos…"
+        PHPhotoLibrary.requestAuthorization(for: .addOnly) { status in
+            guard status == .authorized || status == .limited else {
+                DispatchQueue.main.async { saveNote = "Allow Photos in Settings → TikTok HD → Photos." }
+                return
+            }
+            PHPhotoLibrary.shared().performChanges({
+                let opts = PHAssetResourceCreationOptions()
+                opts.shouldMoveFile = false
+                opts.originalFilename = u.lastPathComponent
+                PHAssetCreationRequest.forAsset().addResource(with: .video, fileURL: u, options: opts)
+            }) { ok, err in
+                DispatchQueue.main.async {
+                    saveNote = ok ? "Saved to Photos (\(u.lastPathComponent))."
+                        : "Photos didn't take it: \(err?.localizedDescription ?? "unknown error"). Use Save to Files."
+                }
+            }
+        }
     }
 
     private func compare(_ k: String, _ a: String, _ b: String) -> some View {
@@ -210,6 +255,15 @@ struct PhotoPicker: UIViewControllerRepresentable {
             }
         }
     }
+}
+
+/// "Save to Files…": the system's export picker (copies the file anywhere in Files / iCloud Drive).
+struct FileExporter: UIViewControllerRepresentable {
+    var url: URL
+    func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
+        UIDocumentPickerViewController(forExporting: [url], asCopy: true)
+    }
+    func updateUIViewController(_ vc: UIDocumentPickerViewController, context: Context) {}
 }
 
 struct ShareSheet: UIViewControllerRepresentable {

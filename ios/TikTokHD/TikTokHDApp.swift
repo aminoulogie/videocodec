@@ -22,7 +22,8 @@ struct RootView: View {
 
     var body: some View {
         TabView(selection: $tab) {
-            PatchView(openStudio: {
+            PatchView(openStudio: { file in
+                browser.pending = file
                 browser.openStudio()
                 tab = .tiktok
             })
