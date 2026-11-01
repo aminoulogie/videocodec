@@ -1,4 +1,4 @@
-**1.3**: The film button tries harder: it fills TikTok's upload box directly (also inside frames and shadow DOM), else presses TikTok's own Select video and puts the video in instead of the file picker, else drops it on the upload area, else asks you to tap Select video (the video goes in instead of the picker). New: ⋯ → Page report, to copy and send if it still fails.
+**1.3**: Fixes "couldn't find TikTok's upload box" (1.2 asked the page without waiting for its answer, so it never saw the box). The film button also tries harder: it fills TikTok's upload box directly (also inside frames and shadow DOM), else presses TikTok's own Select video and puts the video in instead of the file picker, else drops it on the upload area, else asks you to tap Select video (the video goes in instead of the picker). New: ⋯ → Page report, to copy and send if it still fails.
 
 **1.2**: Save the patched video (Save to Files…, Save to Photos, Share / AirDrop). "Upload in TikTok Studio" now puts the video in TikTok's upload box by itself (also the film button in the TikTok tab); if TikTok's page changes and that fails, the app says so and you pick it from Files.
 

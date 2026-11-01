@@ -283,7 +283,10 @@ final class Browser: NSObject, ObservableObject, WKNavigationDelegate, WKUIDeleg
     """
 
     private func js(_ body: String, _ args: [String: Any] = [:]) async throws -> Any? {
-        try await web.callAsyncJavaScript(body, arguments: args, in: nil, in: .page)
+        // The async form (label contentWorld:) waits for the page's answer;
+        // the in:in: form is fire-and-forget and returns nothing.
+        let r: Any? = try await web.callAsyncJavaScript(body, arguments: args, in: nil, contentWorld: .page)
+        return r
     }
 
     /// Sends the file into the page in pieces and offers it to TikTok's upload
@@ -332,7 +335,8 @@ final class Browser: NSObject, ObservableObject, WKNavigationDelegate, WKUIDeleg
                 return
             }
             let ok = "✓ \(file.lastPathComponent) is in the upload box (\(total / 1_000_000) MB, unchanged)."
-            if r == "filled" || (try? await isDone()) == true { status = ok; return }
+            if r == "filled" { status = ok; return }
+            if (try? await isDone()) == true { status = ok; return }
             // A frame may have taken it, or TikTok opens its picker a moment later.
             try await Task.sleep(nanoseconds: 1_500_000_000)
             if (try? await isDone()) == true { status = ok; return }
