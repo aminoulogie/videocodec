@@ -23,7 +23,7 @@ Settings > General > VPN & Device Management. Free Apple ID: install again every
   iOS compresses videos picked from Photos).
 
 Built by GitHub Actions (`.github/workflows/ios.yml`): every push to `main` makes an unsigned `.ipa`
-artifact; a `v*` tag also publishes a release.
+artifact and publishes the release named after `VERSION` (bump it for a new release).
 
 ## PC (`pc/`, needs Python and ffmpeg: `winget install ffmpeg`)
 ```
