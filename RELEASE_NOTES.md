@@ -1,3 +1,5 @@
+**1.1**: TikTok Studio no longer shows "download in App Store": in desktop mode the app now presents itself as Safari on a Mac (Mac user agent, no touch, desktop-size screen, 1280 px layout).
+
 **TikTokHD.ipa**: the iPhone app. Install it with Sideloadly on Windows (free Apple ID; install again every 7 days).
 
 - **Patch** tab: pick a video (Photos or Files). It's copied without re-encoding and patched; the app shows original vs patched (size, fps, HDR, Dolby Vision, frames) and refuses if anything changed. Saved in Files > On My iPhone > TikTok HD.
