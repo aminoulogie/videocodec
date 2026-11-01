@@ -211,9 +211,12 @@ final class Browser: NSObject, ObservableObject, WKNavigationDelegate, WKUIDeleg
         for (var i = 0; i < zones.length && i < 3; i++) {
           try {
             var dt = new DataTransfer(); dt.items.add(file);
+            var taken = false;
             ['dragenter', 'dragover', 'drop'].forEach(function (type) {
-              zones[i].dispatchEvent(new DragEvent(type, { bubbles: true, cancelable: true, dataTransfer: dt }));
+              var ok = zones[i].dispatchEvent(new DragEvent(type, { bubbles: true, cancelable: true, dataTransfer: dt }));
+              if (type === 'drop' && !ok) taken = true;   // the page handled the drop
             });
+            if (taken) { done(); return zones.length; }
           } catch (e) { window.__thdError = String(e); }
         }
         return zones.length;
@@ -230,10 +233,16 @@ final class Browser: NSObject, ObservableObject, WKNavigationDelegate, WKUIDeleg
       function clickSelect() {
         var c = deepAll(document).filter(function (el) {
           var t = (el.innerText || '').trim().toLowerCase();
-          return t.length > 0 && t.length < 40 && /^(select (video|file)s?|upload( video)?|choose (video|file))$/.test(t)
-            && el.getBoundingClientRect().width > 0;
+          if (!(t.length > 0 && t.length < 40 && /^(select (video|file)s?|upload( video)?|choose (video|file))$/.test(t)
+                && el.getBoundingClientRect().width > 0)) return false;
+          // the innermost element with that text (a wrapper's click wouldn't reach the button)
+          return !Array.prototype.some.call(el.children, function (ch) { return (ch.innerText || '').trim().toLowerCase() === t; });
         });
-        c.sort(function (x, y) { return (x.innerText || '').length - (y.innerText || '').length; });
+        c.sort(function (x, y) {
+          var bx = /^(BUTTON|A)$/.test(x.tagName) || x.getAttribute('role') === 'button';
+          var by = /^(BUTTON|A)$/.test(y.tagName) || y.getAttribute('role') === 'button';
+          return by - bx;
+        });
         if (c[0]) { c[0].click(); return true; }
         return false;
       }
