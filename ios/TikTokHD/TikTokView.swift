@@ -88,6 +88,7 @@ final class Browser: NSObject, ObservableObject, WKNavigationDelegate, WKUIDeleg
         web.configuration.defaultWebpagePreferences.preferredContentMode = d ? .desktop : .mobile
         let ucc = web.configuration.userContentController
         ucc.removeAllUserScripts()
+        ucc.addUserScript(WKUserScript(source: Self.handoverJS, injectionTime: .atDocumentStart, forMainFrameOnly: false))
         if d {
             ucc.addUserScript(WKUserScript(source: Self.desktopJS, injectionTime: .atDocumentStart, forMainFrameOnly: false))
         }
@@ -159,98 +160,225 @@ final class Browser: NSObject, ObservableObject, WKNavigationDelegate, WKUIDeleg
             return
         }
         if let file = pending, !injecting, !web.isLoading, web.url?.path.hasPrefix("/tiktokstudio") == true {
-            injecting = true
-            Task {
-                // Studio builds its upload box after the page loads: look for it for 30 s.
-                var found = false
-                for _ in 0..<30 {
-                    if (try? await hasUploadBox()) == true { found = true; break }
-                    try? await Task.sleep(nanoseconds: 1_000_000_000)
-                }
-                if found {
-                    await putInUploadBox(file)
-                } else {
-                    status = "Couldn't find TikTok's upload box. Log in, open Upload, then tap the film button."
-                }
-                pending = nil
-                injecting = false
-            }
+            pending = nil
+            Task { await putInUploadBox(file) }
         }
     }
 
     // MARK: putting a video in TikTok Studio's upload box
 
-    /// Every <input type=file> on the page, also inside same-site frames.
-    private static let findInputJS = """
-    function inputs(doc) {
-      var r = Array.prototype.slice.call(doc.querySelectorAll('input[type=file]'));
-      doc.querySelectorAll('iframe').forEach(function (f) { try { r = r.concat(inputs(f.contentDocument)); } catch (e) {} });
-      return r;
-    }
-    var list = inputs(document);
-    var input = list.find(function (i) { return (i.accept || '').indexOf('video') >= 0; }) || list[0];
+    /// Installed in every frame before the page's own code. While a video is
+    /// waiting (window.__thdFile), whatever TikTok does to open the file picker
+    /// (input.click(), showPicker(), a tap on the input or its label) puts the
+    /// video in instead. Finds inputs inside shadow DOM too, and passes the
+    /// video on to frames (postMessage carries the File itself).
+    static let handoverJS = """
+    (function () {
+      if (window.__thdInstalled) return; window.__thdInstalled = true;
+      function deep(root) {
+        var out = [];
+        (function walk(n) {
+          if (!n || !n.querySelectorAll) return;
+          var all = n.querySelectorAll('*');
+          for (var k = 0; k < all.length; k++) {
+            var el = all[k];
+            if (el.tagName === 'INPUT' && el.type === 'file') out.push(el);
+            if (el.shadowRoot) walk(el.shadowRoot);
+          }
+        })(root);
+        out.sort(function (x, y) { return ((y.accept || '').indexOf('video') >= 0) - ((x.accept || '').indexOf('video') >= 0); });
+        return out;
+      }
+      function done() {
+        window.__thdFile = null; window.__thdDone = true;
+        try { if (window.top !== window) window.top.postMessage({ thd: 'done' }, '*'); } catch (e) {}
+      }
+      function fill(input, file) {
+        try {
+          var dt = new DataTransfer(); dt.items.add(file);
+          input.files = dt.files;
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+          input.dispatchEvent(new Event('change', { bubbles: true }));
+          done(); return true;
+        } catch (e) { window.__thdError = String(e); return false; }
+      }
+      function drop(file) {
+        var zones = deepAll(document).filter(function (el) {
+          var t = (el.innerText || '').toLowerCase();
+          return /drag|drop|select video|select file|upload/.test(t) && el.getBoundingClientRect().width > 150 && t.length < 400;
+        });
+        zones.sort(function (x, y) { return (x.innerText || '').length - (y.innerText || '').length; });
+        for (var i = 0; i < zones.length && i < 3; i++) {
+          try {
+            var dt = new DataTransfer(); dt.items.add(file);
+            ['dragenter', 'dragover', 'drop'].forEach(function (type) {
+              zones[i].dispatchEvent(new DragEvent(type, { bubbles: true, cancelable: true, dataTransfer: dt }));
+            });
+          } catch (e) { window.__thdError = String(e); }
+        }
+        return zones.length;
+      }
+      function deepAll(root) {
+        var out = [];
+        (function walk(n) {
+          if (!n || !n.querySelectorAll) return;
+          var all = n.querySelectorAll('*');
+          for (var k = 0; k < all.length; k++) { out.push(all[k]); if (all[k].shadowRoot) walk(all[k].shadowRoot); }
+        })(root);
+        return out;
+      }
+      function clickSelect() {
+        var c = deepAll(document).filter(function (el) {
+          var t = (el.innerText || '').trim().toLowerCase();
+          return t.length > 0 && t.length < 40 && /^(select (video|file)s?|upload( video)?|choose (video|file))$/.test(t)
+            && el.getBoundingClientRect().width > 0;
+        });
+        c.sort(function (x, y) { return (x.innerText || '').length - (y.innerText || '').length; });
+        if (c[0]) { c[0].click(); return true; }
+        return false;
+      }
+      var oc = HTMLInputElement.prototype.click;
+      HTMLInputElement.prototype.click = function () {
+        if (this.type === 'file' && window.__thdFile && fill(this, window.__thdFile)) return;
+        return oc.apply(this, arguments);
+      };
+      if (HTMLInputElement.prototype.showPicker) {
+        var sp = HTMLInputElement.prototype.showPicker;
+        HTMLInputElement.prototype.showPicker = function () {
+          if (this.type === 'file' && window.__thdFile && fill(this, window.__thdFile)) return;
+          return sp.apply(this, arguments);
+        };
+      }
+      document.addEventListener('click', function (e) {
+        if (!window.__thdFile) return;
+        var t = e.target, inp = null;
+        if (t && t.tagName === 'INPUT' && t.type === 'file') inp = t;
+        else if (t && t.closest) { var l = t.closest('label'); if (l && l.control && l.control.type === 'file') inp = l.control; }
+        if (inp) { e.preventDefault(); fill(inp, window.__thdFile); }
+      }, true);
+      function offer(file) {
+        window.__thdFile = file; window.__thdDone = false;
+        for (var i = 0; i < window.frames.length; i++) { try { window.frames[i].postMessage({ thd: 'file', file: file }, '*'); } catch (e) {} }
+        var list = deep(document);
+        if (list[0] && fill(list[0], file)) return 'filled';
+        if (clickSelect() && window.__thdDone) return 'filled';
+        return 'armed';
+      }
+      window.addEventListener('message', function (e) {
+        var d = e.data; if (!d || !d.thd) return;
+        if (d.thd === 'file' && d.file) offer(d.file);
+        if (d.thd === 'done' && window === window.top) { window.__thdFile = null; window.__thdDone = true; }
+      });
+      window.__thd = { offer: offer, drop: drop, deep: deep, deepAll: deepAll };
+    })();
     """
 
-    func hasUploadBox() async throws -> Bool {
-        let r = try await web.callAsyncJavaScript(Self.findInputJS + "return !!input;", arguments: [:], in: nil, in: .page)
-        return (r as? Bool) == true
+    private func js(_ body: String, _ args: [String: Any] = [:]) async throws -> Any? {
+        try await web.callAsyncJavaScript(body, arguments: args, in: nil, in: .page)
     }
 
-    /// Sends the file into the page in pieces, builds a File from them and
-    /// hands it to TikTok's upload box, as if it had been picked by hand.
+    /// Sends the file into the page in pieces and offers it to TikTok's upload
+    /// box: filled directly if the box is on the page, else TikTok's own
+    /// "Select video" is pressed (the picker is replaced by the video), else a
+    /// drop on the upload area, else it waits for the user to tap Select video.
     /// The bytes are the patched file, unchanged.
     func putInUploadBox(_ file: URL) async {
+        guard !injecting else { return }
+        injecting = true
+        defer { injecting = false }
         do {
-            guard try await hasUploadBox() else {
-                status = "Open TikTok Studio's Upload page first (log in if asked)."
+            // Studio may still be building its page.
+            for _ in 0..<20 {
+                let ready = (try? await js("return !!(window.__thd && document.body && document.body.innerText.length > 50);")) as? Bool
+                if ready == true { break }
+                try await Task.sleep(nanoseconds: 1_000_000_000)
+            }
+            guard (try? await js("return !!window.__thd;")) as? Bool == true else {
+                status = "The page isn't ready. Open Upload in TikTok Studio and tap the film button again."
                 return
             }
             let total = (try FileManager.default.attributesOfItem(atPath: file.path)[.size] as? NSNumber)?.intValue ?? 0
             let fh = try FileHandle(forReadingFrom: file)
             defer { try? fh.close() }
-            _ = try await web.callAsyncJavaScript("window.__thdParts = []; return true;", arguments: [:], in: nil, in: .page)
+            _ = try await js("window.__thdParts = []; return true;")
             var sent = 0
             while let chunk = try fh.read(upToCount: 3 << 20), !chunk.isEmpty {
-                _ = try await web.callAsyncJavaScript("""
+                _ = try await js("""
                     var bin = atob(b64), a = new Uint8Array(bin.length);
                     for (var i = 0; i < bin.length; i++) a[i] = bin.charCodeAt(i);
                     window.__thdParts.push(new Blob([a]));
                     return a.length;
-                    """, arguments: ["b64": chunk.base64EncodedString()], in: nil, in: .page)
+                    """, ["b64": chunk.base64EncodedString()])
                 sent += chunk.count
                 status = "Handing the video to TikTok… \(total > 0 ? sent * 100 / total : 0)%"
             }
-            let r = try await web.callAsyncJavaScript(Self.findInputJS + """
-                if (!input) return 'no-input';
+            let r = try await js("""
                 var f = new File(window.__thdParts, name, { type: 'video/mp4', lastModified: Date.now() });
                 window.__thdParts = null;
                 if (f.size !== size) return 'size ' + f.size;
-                var dt = new DataTransfer();
-                dt.items.add(f);
-                input.files = dt.files;
-                input.dispatchEvent(new Event('input', { bubbles: true }));
-                input.dispatchEvent(new Event('change', { bubbles: true }));
-                return 'ok';
-                """, arguments: ["name": file.lastPathComponent, "size": total], in: nil, in: .page)
-            let res = r as? String ?? "?"
-            status = res == "ok"
-                ? "✓ \(file.lastPathComponent) is in the upload box (\(total / 1_000_000) MB, unchanged)."
-                : "Couldn't hand it over (\(res)). Tap Select video and pick it from Files → On My iPhone → TikTok HD."
+                return window.__thd.offer(f);
+                """, ["name": file.lastPathComponent, "size": total]) as? String ?? "?"
+            if r.hasPrefix("size") {
+                status = "The video arrived damaged (\(r)). Pick it from Files → On My iPhone → TikTok HD."
+                return
+            }
+            let ok = "✓ \(file.lastPathComponent) is in the upload box (\(total / 1_000_000) MB, unchanged)."
+            if r == "filled" || (try? await isDone()) == true { status = ok; return }
+            // A frame may have taken it, or TikTok opens its picker a moment later.
+            try await Task.sleep(nanoseconds: 1_500_000_000)
+            if (try? await isDone()) == true { status = ok; return }
+            _ = try? await js("if (window.__thdFile) window.__thd.drop(window.__thdFile); return true;")
+            try await Task.sleep(nanoseconds: 1_500_000_000)
+            if (try? await isDone()) == true { status = ok; return }
+            status = "Now tap Select video on TikTok's page: the video goes in instead of the file picker."
+            for _ in 0..<120 {
+                try await Task.sleep(nanoseconds: 1_000_000_000)
+                if (try? await isDone()) == true { status = ok; return }
+            }
+            status = "It didn't go in. Tap ⋯ → Page report and send it, or pick the video from Files → On My iPhone → TikTok HD."
         } catch {
             status = "Couldn't hand it over: \(error.localizedDescription). Pick it from Files → On My iPhone → TikTok HD."
         }
-        try? await Task.sleep(nanoseconds: 6_000_000_000)
-        if status?.hasPrefix("✓") == true { status = nil }
+    }
+
+    private func isDone() async throws -> Bool {
+        (try await js("return window.__thdDone === true;")) as? Bool == true
     }
 
     /// The film button: put a patched video in the upload box now.
     func upload(_ file: URL) {
         if web.url?.path.hasPrefix("/tiktokstudio") == true, !web.isLoading {
-            pending = nil
             Task { await putInUploadBox(file) }
         } else {
             pending = file
             openStudio()
+        }
+    }
+
+    /// What the page looks like to the app, to send when something fails.
+    func pageReport() async -> String {
+        let body = """
+        var d = window.__thd, ins = d ? d.deep(document) : [];
+        var frames = Array.prototype.map.call(document.querySelectorAll('iframe'), function (f) { return (f.src || '(no src)').slice(0, 120); });
+        var btn = d ? d.deepAll(document).filter(function (el) {
+          var t = (el.innerText || '').trim(); return t.length > 0 && t.length < 40 && /select|upload|choose|drag|drop|app store|download/i.test(t);
+        }).slice(0, 12).map(function (el) { return el.tagName.toLowerCase() + ': ' + el.innerText.trim().replace(/\\s+/g, ' '); }) : [];
+        return [
+          'url: ' + location.href,
+          'title: ' + document.title,
+          'ua: ' + navigator.userAgent,
+          'touch: ' + navigator.maxTouchPoints + ', width: ' + innerWidth + ', screen: ' + screen.width + 'x' + screen.height,
+          'helper: ' + (!!d) + ', waiting: ' + (!!window.__thdFile) + ', done: ' + (!!window.__thdDone) + ', error: ' + (window.__thdError || '-'),
+          'file inputs: ' + ins.length + ins.map(function (i) { return ' [accept=' + i.accept + ']'; }).join(''),
+          'iframes: ' + frames.length + (frames.length ? ' ' + frames.join(' | ') : ''),
+          'buttons: ' + btn.join(' | '),
+          'text: ' + (document.body ? document.body.innerText.replace(/\\s+/g, ' ').slice(0, 300) : '-')
+        ].join('\\n');
+        """
+        do {
+            return (try await js(body)) as? String ?? "(no answer)"
+        } catch {
+            return "error: \(error.localizedDescription)\nurl: \(web.url?.absoluteString ?? "-")"
         }
     }
 
@@ -271,6 +399,7 @@ struct WebView: UIViewRepresentable {
 struct TikTokView: View {
     @EnvironmentObject var b: Browser
     @State private var timer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
+    @State private var report: String?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -304,6 +433,9 @@ struct TikTokView: View {
                     Button(b.desktop ? "Switch to mobile version" : "Switch to desktop version") { b.toggleDesktop() }
                     Button("Automatic (desktop only in Studio)") { b.automatic() }
                     Button("Log in page") { b.open(Browser.home) }
+                    Button("Page report (to send if upload fails)") {
+                        Task { report = await b.pageReport() }
+                    }
                 } label: {
                     Image(systemName: b.desktop ? "desktopcomputer" : "iphone")
                 }
@@ -315,5 +447,23 @@ struct TikTokView: View {
         }
         .onAppear { b.start() }
         .onReceive(timer) { _ in b.update() }   // follows TikTok's in-page navigation
+        .sheet(isPresented: Binding(get: { report != nil }, set: { if !$0 { report = nil } })) {
+            NavigationStack {
+                ScrollView {
+                    Text(report ?? "").font(.system(.footnote, design: .monospaced)).textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading).padding()
+                }
+                .navigationTitle("Page report")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Copy") { UIPasteboard.general.string = report }
+                    }
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Close") { report = nil }
+                    }
+                }
+            }
+        }
     }
 }

@@ -1,3 +1,5 @@
+**1.3**: The film button tries harder: it fills TikTok's upload box directly (also inside frames and shadow DOM), else presses TikTok's own Select video and puts the video in instead of the file picker, else drops it on the upload area, else asks you to tap Select video (the video goes in instead of the picker). New: ⋯ → Page report, to copy and send if it still fails.
+
 **1.2**: Save the patched video (Save to Files…, Save to Photos, Share / AirDrop). "Upload in TikTok Studio" now puts the video in TikTok's upload box by itself (also the film button in the TikTok tab); if TikTok's page changes and that fails, the app says so and you pick it from Files.
 
 **1.1**: TikTok Studio no longer shows "download in App Store": in desktop mode the app now presents itself as Safari on a Mac (Mac user agent, no touch, desktop-size screen, 1280 px layout).
