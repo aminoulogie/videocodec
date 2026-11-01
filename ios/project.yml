@@ -1,0 +1,35 @@
+name: TikTokHD
+options:
+  bundleIdPrefix: app.tiktokhd
+  deploymentTarget:
+    iOS: "16.0"
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "1.0"
+    CURRENT_PROJECT_VERSION: "1"
+targets:
+  TikTokHD:
+    type: application
+    platform: iOS
+    sources: [TikTokHD]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: app.tiktokhd.patcher
+        TARGETED_DEVICE_FAMILY: "1,2"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+    info:
+      path: TikTokHD/Info.plist
+      properties:
+        CFBundleDisplayName: TikTok HD
+        UILaunchScreen: {}
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        NSPhotoLibraryUsageDescription: Pick the video you want to patch.
+        NSPhotoLibraryAddUsageDescription: Save patched videos.
+        NSCameraUsageDescription: TikTok can record a video from its upload page.
+        NSMicrophoneUsageDescription: TikTok can record a video from its upload page.
