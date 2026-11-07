@@ -33,6 +33,10 @@ struct RootView: View {
             TikTokView()
                 .tabItem { Label("TikTok", systemImage: "globe") }
                 .tag(Tab.tiktok)
+
+            AccountsView()
+                .tabItem { Label("Accounts", systemImage: "person.2") }
+                .tag(Tab.accounts)
         }
     }
 }
