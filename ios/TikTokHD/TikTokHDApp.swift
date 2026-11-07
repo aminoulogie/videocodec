@@ -14,7 +14,7 @@ struct TikTokHDApp: App {
     }
 }
 
-enum Tab: Hashable { case patch, tiktok }
+enum Tab: Hashable { case patch, tiktok, accounts }
 
 struct RootView: View {
     @EnvironmentObject var browser: Browser
