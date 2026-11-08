@@ -5,12 +5,13 @@ import Foundation
 /// TikTok changes how it handles uploads often, so there are several; if one
 /// stops working, try another.
 enum PatchMethod: String, CaseIterable, Identifiable {
-    case header, inflate, fps
+    case silent, header, inflate, fps
 
     var id: String { rawValue }
 
     var title: String {
         switch self {
+        case .silent: return "Silent"
         case .header: return "Header"
         case .inflate: return "Inflate"
         case .fps: return "FPS"
@@ -19,6 +20,8 @@ enum PatchMethod: String, CaseIterable, Identifiable {
 
     var blurb: String {
         switch self {
+        case .silent:
+            return "Recommended. Rebuilds the file layout the way the newest community method does (Nov 2026): index first, sound and picture interleaved, filler samples, metadata removed."
         case .header:
             return "Sets the movie length to the longest possible. The original trick."
         case .inflate:
@@ -435,5 +438,299 @@ enum Mp4 {
 
         try write(from: fh, to: dst, layout: l, newMoov: moov, extra: mdat)
         return (real, fake)
+    }
+
+    // MARK: silent method
+
+    /// Independent implementation of the layout described by AscendedTweaks/silent-method
+    /// (Nov 2026). Mirrors silent_layout() in pc/tiktok_methods.py byte for byte:
+    /// ftyp, free, moov, one mdat; samples of all tracks interleaved by time (runs of
+    /// video frames share a chunk); 8-byte filler video samples listed only in stsz/stco
+    /// (up to duration x 400); last video frame lasts 1 tick; btrt max = avg; pasp 1:1
+    /// when missing; creation and modification times zeroed; udta and meta removed.
+    static let silentFakePerSecond = 400
+    static let silentFiller: [UInt8] = [0, 0, 0, 4, 0, 0, 0, 0]
+
+    private struct SilentTrack {
+        var trakOffset: Int
+        var stbl: Box
+        var handler: String
+        var timescale: Int
+        var duration: Int
+        var deltas: [Int]
+        var sizes: [Int]
+        var offs: [UInt64]
+        var shift: Int
+        var dts: [Int]
+    }
+
+    private static func headerTiming(_ b: [UInt8], _ box: Box) throws -> (timescale: Int, duration: Int) {
+        let body = box.body
+        guard box.size - box.header >= 20 else { throw PatchError.damaged("short header box") }
+        if b[body] == 1 {
+            guard box.size - box.header >= 32 else { throw PatchError.damaged("short header box") }
+            return (u32(b, body + 20), Int(clamping: u64(b, body + 24)))
+        }
+        return (u32(b, body + 12), u32(b, body + 16))
+    }
+
+    private static func signed32(_ v: Int) -> Int { v >= 0x8000_0000 ? v - 0x1_0000_0000 : v }
+
+    private static func silentTrack(_ m: [UInt8], _ trak: Box) throws -> SilentTrack {
+        guard let mdia = try child(m, trak, "mdia"), let minf = try child(m, mdia, "minf"),
+              let stbl = try child(m, minf, "stbl"), let mdhd = try child(m, mdia, "mdhd") else {
+            throw PatchError.damaged("track without sample table")
+        }
+        var handler = "????"
+        if let hdlr = try child(m, mdia, "hdlr"), hdlr.size - hdlr.header >= 12 { handler = fourcc(m, hdlr.body + 8) }
+        let (ts, dur) = try headerTiming(m, mdhd)
+        let kids = try children(m, stbl.body, stbl.end)
+        func find(_ t: String) -> Box? { kids.first { $0.type == t } }
+        guard let stts = find("stts"), let stsz = find("stsz"), let stsc = find("stsc"),
+              let stsd = find("stsd"), let co = find("stco") ?? find("co64") else {
+            throw PatchError.damaged("track sample tables are incomplete")
+        }
+        var deltas: [Int] = []
+        let sc = u32(m, stts.body + 4)
+        guard stts.body + 8 + 8 * sc <= stts.end else { throw PatchError.damaged("bad stts") }
+        for k in 0..<sc {
+            let n = u32(m, stts.body + 8 + 8 * k), d = u32(m, stts.body + 12 + 8 * k)
+            deltas.append(contentsOf: repeatElement(d, count: n))
+        }
+        let uniform = u32(m, stsz.body + 4), zc = u32(m, stsz.body + 8)
+        var sizes: [Int] = []
+        for k in 0..<min(zc, deltas.count) {
+            if uniform != 0 { sizes.append(uniform) } else {
+                guard stsz.body + 16 + 4 * k <= stsz.end else { throw PatchError.damaged("bad stsz") }
+                sizes.append(u32(m, stsz.body + 12 + 4 * k))
+            }
+        }
+        let is64 = co.type == "co64", step = is64 ? 8 : 4, cc = u32(m, co.body + 4)
+        guard co.body + 8 + step * cc <= co.end else { throw PatchError.damaged("bad chunk table") }
+        let chunks: [UInt64] = (0..<cc).map { k in
+            let at = co.body + 8 + step * k
+            return is64 ? u64(m, at) : UInt64(u32(m, at))
+        }
+        let ec = u32(m, stsc.body + 4)
+        guard stsc.body + 8 + 12 * ec <= stsc.end else { throw PatchError.damaged("bad stsc") }
+        let stscE: [(Int, Int, Int)] = (0..<ec).map { k in
+            let at = stsc.body + 8 + 12 * k
+            return (u32(m, at), u32(m, at + 4), u32(m, at + 8))
+        }
+        if u32(m, stsd.body + 4) != 1 || stscE.contains(where: { $0.2 != 1 }) {
+            throw PatchError.damaged("multiple sample descriptions are not supported")
+        }
+        var offs: [UInt64] = []
+        offs.reserveCapacity(sizes.count)
+        var ei = 0
+        for (ci, base) in chunks.enumerated() {
+            while ei + 1 < stscE.count && stscE[ei + 1].0 <= ci + 1 { ei += 1 }
+            var o = base
+            let per = stscE.isEmpty ? 0 : stscE[ei].1
+            for _ in 0..<per {
+                if offs.count >= sizes.count { break }
+                offs.append(o)
+                o += UInt64(sizes[offs.count - 1])
+            }
+        }
+        guard offs.count == sizes.count else { throw PatchError.damaged("sample table is inconsistent") }
+        var shift = 0
+        if let edts = try child(m, trak, "edts"), let elst = try child(m, edts, "elst") {
+            let p = elst.body, ver = m[p]
+            for k in 0..<u32(m, p + 4) {
+                let t: Int
+                if ver == 0 { t = signed32(u32(m, p + 12 + 8 * k)) } else { t = Int(Int64(bitPattern: u64(m, p + 16 + 16 * k))) }
+                if t != -1 { shift = t; break }
+            }
+        }
+        var dts: [Int] = []
+        dts.reserveCapacity(deltas.count)
+        var t = 0
+        for d in deltas { dts.append(t); t += d }
+        return SilentTrack(trakOffset: trak.offset, stbl: stbl, handler: handler, timescale: max(ts, 1),
+                           duration: dur, deltas: deltas, sizes: sizes, offs: offs, shift: shift, dts: dts)
+    }
+
+    private static func silentStsd(_ m: [UInt8], _ stsd: Box, _ tr: SilentTrack) throws -> [UInt8] {
+        let p = stsd.body
+        let esize = u32(m, p + 8)
+        let etype = fourcc(m, p + 12)
+        let es = p + 16, ee = p + 8 + esize
+        guard ee <= stsd.end, es + 78 <= ee else { throw PatchError.damaged("bad sample description") }
+        let kids = try children(m, es + 78, ee)
+        let btrt = kids.first { $0.type == "btrt" }, pasp = kids.first { $0.type == "pasp" }
+        let avg: Int
+        if let b = btrt { avg = u32(m, b.body + 8) } else {
+            avg = tr.duration > 0 ? (tr.sizes.reduce(0, +) * 8 * tr.timescale) / tr.duration : 0
+        }
+        var body = Array(m[es ..< es + 78])
+        for k in kids where k.type != "pasp" && k.type != "btrt" { body += m[k.offset ..< k.end] }
+        body += makeBox("pasp", pasp.map { Array(m[$0.body ..< $0.end]) } ?? bytes32(1) + bytes32(1))
+        body += makeBox("btrt", bytes32(0) + bytes32(avg) + bytes32(avg))
+        return makeBox("stsd", Array(m[p ..< p + 8]) + makeBox(etype, body))
+    }
+
+    private static func zeroTimes(_ m: [UInt8], _ box: Box) -> [UInt8] {
+        var b = Array(m[box.offset ..< box.end])
+        let body = box.header
+        let n = b[body] == 0 ? 8 : 16
+        for i in (body + 4) ..< min(b.count, body + 4 + n) { b[i] = 0 }
+        return b
+    }
+
+    /// Returns (real video frames, filler samples).
+    @discardableResult
+    static func silent(src: URL, dst: URL, maxSeconds: Int = 300) throws -> (frames: Int, fakes: Int) {
+        let fh = try FileHandle(forReadingFrom: src)
+        defer { try? fh.close() }
+        let tops = try topBoxes(fh)
+        if tops.contains(where: { $0.type == "moof" }) { throw PatchError.damaged("fragmented MP4 is not supported") }
+        guard let ft = tops.first(where: { $0.type == "ftyp" }), let mv = tops.first(where: { $0.type == "moov" }) else {
+            throw PatchError.damaged("not a valid MP4 (ftyp/moov missing)")
+        }
+        guard mv.header == 8 else { throw PatchError.damaged("64-bit moov size") }
+        func readAt(_ o: Int, _ n: Int) throws -> [UInt8] {
+            try fh.seek(toOffset: UInt64(o))
+            guard let d = try fh.read(upToCount: n), d.count == n else { throw PatchError.damaged("short read") }
+            return [UInt8](d)
+        }
+        let ftyp = try readAt(ft.offset, ft.size)
+        let m = try readAt(mv.offset, mv.size)
+        let moovBox = Box(type: "moov", offset: 0, size: m.count, header: 8)
+        let traks = try children(m, 8, m.count).filter { $0.type == "trak" }
+        let tracks = try traks.map { try silentTrack(m, $0) }
+        guard let vi = tracks.firstIndex(where: { $0.handler == "vide" }) else { throw PatchError.damaged("no video track") }
+        let v = tracks[vi]
+        if Double(v.duration) / Double(v.timescale) > Double(maxSeconds) {
+            throw PatchError.damaged("video longer than \(maxSeconds / 60) minutes")
+        }
+
+        // interleave by time, video first on ties; runs of video frames share a chunk
+        struct Ev { let n: Int; let d: Int; let nv: Int; let i: Int; let s: Int }
+        var ev: [Ev] = []
+        for (i, tr) in tracks.enumerated() {
+            for (s, d) in tr.dts.enumerated() { ev.append(Ev(n: d - tr.shift, d: tr.timescale, nv: i == vi ? 0 : 1, i: i, s: s)) }
+        }
+        ev.sort { a, b in
+            let l = a.n * b.d, r = b.n * a.d
+            if l != r { return l < r }
+            if a.nv != b.nv { return a.nv < b.nv }
+            if a.i != b.i { return a.i < b.i }
+            return a.s < b.s
+        }
+        var chunks: [(Int, [Int])] = []
+        for e in ev {
+            if let last = chunks.last, last.0 == e.i, e.i == vi { chunks[chunks.count - 1].1.append(e.s) } else { chunks.append((e.i, [e.s])) }
+        }
+        var layout = Array(repeating: [(Int, Int)](), count: tracks.count)
+        var rel = 0
+        for (i, ss) in chunks {
+            layout[i].append((rel, ss.count))
+            for s in ss { rel += tracks[i].sizes[s] }
+        }
+        let want = Int((Double(v.duration) * Double(silentFakePerSecond) / Double(v.timescale) + 0.5).rounded(.down))
+        let nFake = max(0, want - v.sizes.count)
+        for _ in 0..<nFake { layout[vi].append((rel, 1)) }
+
+        func stblBytes(_ i: Int, _ base: Int) throws -> [UInt8] {
+            let tr = tracks[i], isV = i == vi
+            let sizes = isV ? tr.sizes + Array(repeating: silentFiller.count, count: nFake) : tr.sizes
+            let firstFake = isV ? layout[i].count - nFake + 1 : -1
+            var stsc: [(Int, Int, Int)] = []
+            for (k, c) in layout[i].enumerated() {
+                if stsc.isEmpty || stsc[stsc.count - 1].1 != c.1 || k + 1 == firstFake { stsc.append((k + 1, c.1, 1)) }
+            }
+            var out: [UInt8] = []
+            for b in try children(m, tr.stbl.body, tr.stbl.end) {
+                switch b.type {
+                case "stts" where isV:
+                    var vals = Array(tr.deltas.dropLast())
+                    if !tr.deltas.isEmpty { vals.append(1) }
+                    var runs: [(Int, Int)] = []
+                    for x in vals {
+                        if let l = runs.last, l.1 == x { runs[runs.count - 1].0 += 1 } else { runs.append((1, x)) }
+                    }
+                    var p = bytes32(0) + bytes32(runs.count)
+                    for (n, d) in runs { p += bytes32(n) + bytes32(d) }
+                    out += makeBox("stts", p)
+                case "stsd" where isV:
+                    out += try silentStsd(m, b, tr)
+                case "stsz":
+                    var p = bytes32(0) + bytes32(0) + bytes32(sizes.count)
+                    p.reserveCapacity(12 + 4 * sizes.count)
+                    for x in sizes { p += bytes32(x) }
+                    out += makeBox("stsz", p)
+                case "stsc":
+                    var p = bytes32(0) + bytes32(stsc.count)
+                    for (a, n, c) in stsc { p += bytes32(a) + bytes32(n) + bytes32(c) }
+                    out += makeBox("stsc", p)
+                case "stco", "co64":
+                    var p = bytes32(0) + bytes32(layout[i].count)
+                    p.reserveCapacity(8 + 4 * layout[i].count)
+                    for (o, _) in layout[i] { p += bytes32(base + o) }
+                    out += makeBox("stco", p)
+                default:
+                    out += m[b.offset ..< b.end]
+                }
+            }
+            return out
+        }
+
+        func rebuild(_ parent: Box, _ base: Int, _ ti: Int?) throws -> [UInt8] {
+            var out: [UInt8] = []
+            for b in try children(m, parent.body, parent.end) {
+                switch b.type {
+                case "udta", "meta":
+                    continue
+                case "mvhd", "tkhd", "mdhd":
+                    out += zeroTimes(m, b)
+                case "trak":
+                    out += makeBox("trak", try rebuild(b, base, traks.firstIndex { $0.offset == b.offset }))
+                case "mdia", "minf":
+                    out += makeBox(b.type, try rebuild(b, base, ti))
+                case "stbl":
+                    guard let ti else { throw PatchError.damaged("sample table outside a track") }
+                    out += makeBox("stbl", try stblBytes(ti, base))
+                default:
+                    out += m[b.offset ..< b.end]
+                }
+            }
+            return out
+        }
+
+        let head = ftyp + makeBox("free", [])
+        let probe = makeBox("moov", try rebuild(moovBox, 0, nil))
+        let base = head.count + probe.count + 8
+        let mdatSize = 8 + rel + silentFiller.count
+        guard base + mdatSize < (1 << 32) else { throw PatchError.damaged("output over 4 GB is not supported") }
+        let newMoov = makeBox("moov", try rebuild(moovBox, base, nil))
+        guard newMoov.count == probe.count else { throw PatchError.damaged("index size changed unexpectedly") }
+
+        FileManager.default.createFile(atPath: dst.path, contents: nil)
+        let out = try FileHandle(forWritingTo: dst)
+        defer { try? out.close() }
+        try out.write(contentsOf: Data(head + newMoov + bytes32(mdatSize) + Array("mdat".utf8)))
+        func copy(_ o: UInt64, _ n: Int) throws {
+            try fh.seek(toOffset: o)
+            var left = n
+            while left > 0 {
+                guard let c = try fh.read(upToCount: min(left, 4 << 20)), !c.isEmpty else { throw PatchError.damaged("short read") }
+                try out.write(contentsOf: c)
+                left -= c.count
+            }
+        }
+        var run: (UInt64, Int)?
+        for (i, ss) in chunks {
+            for s in ss {
+                let o = tracks[i].offs[s], n = tracks[i].sizes[s]
+                if let r = run, r.0 + UInt64(r.1) == o { run = (r.0, r.1 + n) } else {
+                    if let r = run { try copy(r.0, r.1) }
+                    run = (o, n)
+                }
+            }
+        }
+        if let r = run { try copy(r.0, r.1) }
+        try out.write(contentsOf: Data(silentFiller))
+        return (v.sizes.count, nFake)
     }
 }

@@ -14,6 +14,19 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+      - name: Check the iPhone patches match the PC ones byte for byte
+        run: |
+          set -e
+          python3 tests/parity.py out
+          swiftc -O ios/TikTokHD/Mp4Methods.swift tests/swiftcheck/PatchErrorShim.swift tests/swiftcheck/main.swift -o swiftcheck
+          ./swiftcheck tests/fixtures out
+          fail=0
+          for p in out/*.mp4; do
+            case "$p" in *.swift.mp4) continue;; esac
+            s="${p%.mp4}.swift.mp4"
+            if cmp -s "$p" "$s"; then echo "same: $(basename "$p")"; else echo "DIFFERENT: $(basename "$p")"; fail=1; fi
+          done
+          exit $fail
       - name: Install XcodeGen
         run: brew install xcodegen
       - name: Build (unsigned; Sideloadly signs it with your Apple ID)

@@ -593,3 +593,264 @@ def inflate_video_samples(
         "fake_mdat_bytes": len(padding),
         "moov_before_mdat": moov_before_mdat,
     }
+
+
+# ---------------------------------------------------------------------------
+# "Silent" layout (independent implementation of the technique described by
+# AscendedTweaks/silent-method, Nov 2026). Container only, nothing re-encoded:
+#   - ftyp, moov, then one mdat (index first, "faststart")
+#   - samples of all tracks interleaved by time; runs of video frames share a chunk
+#   - filler 8-byte video samples in stsz/stco only (not in stts, so players
+#     ignore them), up to duration x 400 samples
+#   - last video frame lasts 1 tick in stts
+#   - btrt: max bitrate = average bitrate; pasp 1:1 when missing
+#   - creation/modification times zeroed; udta and meta removed
+# ---------------------------------------------------------------------------
+
+SILENT_FAKE_PER_SEC = 400
+SILENT_FILLER = b"\x00\x00\x00\x04\x00\x00\x00\x00"
+
+
+def _children_list(data, start, end):
+    return list(iter_boxes(data, start, end))
+
+
+def _box(typ, payload):
+    return _p32(8 + len(payload)) + typ.encode("latin-1") + payload
+
+
+def _rle(values):
+    out = []
+    for v in values:
+        if out and out[-1][1] == v:
+            out[-1][0] += 1
+        else:
+            out.append([1, v])
+    return out
+
+
+def _silent_track(data, trak):
+    mdia = find_child(data, trak, "mdia")
+    minf = find_child(data, mdia, "minf") if mdia else None
+    stbl = find_child(data, minf, "stbl") if minf else None
+    if stbl is None:
+        raise MP4Error("track without sample table")
+    hdlr = find_child(data, mdia, "hdlr")
+    handler = bytes(data[hdlr.payload_start + 8:hdlr.payload_start + 12]).decode("latin-1") if hdlr else "????"
+    mdhd = find_child(data, mdia, "mdhd")
+    _, timescale, duration = read_header_timing(data, mdhd)
+    kids = {b.type: b for b in iter_boxes(data, stbl.payload_start, stbl.payload_end)}
+    for need in ("stts", "stsz", "stsc", "stsd"):
+        if need not in kids:
+            raise MP4Error(f"track without {need}")
+    if "stco" not in kids and "co64" not in kids:
+        raise MP4Error("track without chunk offsets")
+    entries, _ = _parse_stts(data, kids["stts"]) if _u32(data, kids["stts"].payload_start + 4) else ([], 0)
+    deltas = []
+    for n, d in entries:
+        deltas.extend([d] * n)
+    sizes = _parse_sample_sizes(data, kids["stsz"])[:len(deltas)]  # only timed samples (re-patch safe)
+    chunks = _parse_chunk_offsets(data, kids.get("stco") or kids.get("co64"))
+    stsc = _parse_stsc(data, kids["stsc"])
+    if _u32(data, kids["stsd"].payload_start + 4) != 1 or any(e[2] != 1 for e in stsc):
+        raise MP4Error("multiple sample descriptions are not supported")
+    offs = []
+    ei = 0
+    for ci, base in enumerate(chunks):
+        while ei + 1 < len(stsc) and stsc[ei + 1][0] <= ci + 1:
+            ei += 1
+        o = base
+        for _ in range(stsc[ei][1] if stsc else 0):
+            if len(offs) >= len(sizes):
+                break
+            offs.append(o)
+            o += sizes[len(offs) - 1]
+    if len(offs) != len(sizes):
+        raise MP4Error("sample table is inconsistent")
+    shift = 0
+    edts = find_child(data, trak, "edts")
+    elst = find_child(data, edts, "elst") if edts else None
+    if elst:
+        p = elst.payload_start
+        ver = data[p]
+        for k in range(_u32(data, p + 4)):
+            if ver == 0:
+                t = struct.unpack(">i", bytes(data[p + 12 + 8 * k:p + 16 + 8 * k]))[0]
+            else:
+                t = struct.unpack(">q", bytes(data[p + 16 + 16 * k:p + 24 + 16 * k]))[0]
+            if t != -1:
+                shift = t
+                break
+    dts, t = [], 0
+    for d in deltas:
+        dts.append(t)
+        t += d
+    return {"trak": trak, "stbl": stbl, "handler": handler, "timescale": timescale or 1,
+            "duration": duration, "deltas": deltas, "sizes": sizes, "offs": offs,
+            "shift": shift, "dts": dts}
+
+
+def _silent_stsd(data, stsd, tr):
+    p = stsd.payload_start
+    esize = _u32(data, p + 8)
+    etype = bytes(data[p + 12:p + 16]).decode("latin-1")
+    entry_start, entry_end = p + 16, p + 8 + esize
+    kids = list(iter_boxes(data, entry_start + 78, entry_end))  # 78 bytes of VisualSampleEntry fields
+    old = {b.type: b for b in kids}
+    if "btrt" in old:
+        avg = _u32(data, old["btrt"].payload_start + 8)
+    else:
+        avg = (sum(tr["sizes"]) * 8 * tr["timescale"]) // tr["duration"] if tr["duration"] else 0
+    body = bytes(data[entry_start:entry_start + 78])
+    for b in kids:
+        if b.type in ("pasp", "btrt"):
+            continue
+        body += bytes(data[b.start:b.end])
+    pasp = bytes(data[old["pasp"].payload_start:old["pasp"].payload_end]) if "pasp" in old else _p32(1) + _p32(1)
+    body += _box("pasp", pasp) + _box("btrt", _p32(0) + _p32(avg) + _p32(avg))
+    head = bytes(data[p:p + 8])  # version/flags + entry_count
+    return _box("stsd", head + _box(etype, body))
+
+
+def _zero_times(data, box):
+    b = bytearray(data[box.start:box.end])
+    body = box.payload_start - box.start
+    n = 8 if b[body] == 0 else 16
+    b[body + 4:body + 4 + n] = b"\x00" * n
+    return bytes(b)
+
+
+def silent_layout(src_path, dst_path, max_seconds=300):
+    """Rewrite src into dst with the Silent layout. Returns a report dict."""
+    import os
+    size = os.path.getsize(src_path)
+    with open(src_path, "rb") as f:
+        tops = []
+        pos = 0
+        while pos + 8 <= size:
+            f.seek(pos)
+            head = f.read(16)
+            sz, typ = struct.unpack(">I4s", head[:8])
+            typ = typ.decode("latin-1")
+            if sz == 1:
+                sz = struct.unpack(">Q", head[8:16])[0]
+            elif sz == 0:
+                sz = size - pos
+            if sz < 8:
+                raise MP4Error("damaged MP4 structure")
+            if typ == "moof":
+                raise MP4Error("fragmented MP4 is not supported")
+            tops.append((typ, pos, sz))
+            pos += sz
+        ftyp = next((t for t in tops if t[0] == "ftyp"), None)
+        moovt = next((t for t in tops if t[0] == "moov"), None)
+        if not ftyp or not moovt:
+            raise MP4Error("not a valid MP4 (ftyp/moov missing)")
+        f.seek(ftyp[1]); ftyp_bytes = f.read(ftyp[2])
+        f.seek(moovt[1]); moov = f.read(moovt[2])
+
+        mbox = Box(0, len(moov), "moov", 8)
+        traks = [b for b in iter_boxes(moov, 8, len(moov)) if b.type == "trak"]
+        tracks = [_silent_track(moov, t) for t in traks]
+        vi = next((i for i, t in enumerate(tracks) if t["handler"] == "vide"), -1)
+        if vi < 0:
+            raise MP4Error("no video track")
+        v = tracks[vi]
+        if v["duration"] / v["timescale"] > max_seconds:
+            raise MP4Error(f"video longer than {max_seconds // 60} minutes")
+
+        # interleave by time (video first on ties); runs of video frames share a chunk
+        from fractions import Fraction
+        ev = []
+        for i, tr in enumerate(tracks):
+            for s, d in enumerate(tr["dts"]):
+                ev.append((Fraction(d - tr["shift"], tr["timescale"]), 0 if i == vi else 1, i, s))
+        ev.sort()
+        chunks = []
+        for _, _, i, s in ev:
+            if chunks and chunks[-1][0] == i and i == vi:
+                chunks[-1][1].append(s)
+            else:
+                chunks.append([i, [s]])
+        layout = [[] for _ in tracks]
+        rel = 0
+        for i, ss in chunks:
+            layout[i].append([rel, len(ss)])
+            for s in ss:
+                rel += tracks[i]["sizes"][s]
+        import math
+        n_fake = max(0, math.floor(v["duration"] * SILENT_FAKE_PER_SEC / v["timescale"] + 0.5) - len(v["sizes"]))
+        for _ in range(n_fake):
+            layout[vi].append([rel, 1])
+
+        def stbl_bytes(i, base):
+            tr = tracks[i]
+            is_v = i == vi
+            sizes = tr["sizes"] + ([len(SILENT_FILLER)] * n_fake if is_v else [])
+            first_fake = len(layout[i]) - n_fake + 1 if is_v else -1
+            stsc = []
+            for k, (_, n) in enumerate(layout[i]):
+                if not stsc or stsc[-1][1] != n or k + 1 == first_fake:
+                    stsc.append((k + 1, n, 1))
+            out = b""
+            for b in iter_boxes(moov, tr["stbl"].payload_start, tr["stbl"].payload_end):
+                if b.type == "stts" and is_v:
+                    r = _rle(tr["deltas"][:-1] + [1])
+                    out += _box("stts", _p32(0) + _p32(len(r)) + b"".join(_p32(n) + _p32(d) for n, d in r))
+                elif b.type == "stsd" and is_v:
+                    out += _silent_stsd(moov, b, tr)
+                elif b.type == "stsz":
+                    out += _box("stsz", _p32(0) + _p32(0) + _p32(len(sizes)) + b"".join(_p32(x) for x in sizes))
+                elif b.type == "stsc":
+                    out += _box("stsc", _p32(0) + _p32(len(stsc)) + b"".join(_p32(a) + _p32(n) + _p32(c) for a, n, c in stsc))
+                elif b.type in ("stco", "co64"):
+                    offs = [base + o for o, _ in layout[i]]
+                    out += _box("stco", _p32(0) + _p32(len(offs)) + b"".join(_p32(o) for o in offs))
+                else:
+                    out += bytes(moov[b.start:b.end])
+            return out
+
+        def rebuild(parent, base, track_idx=None):
+            out = b""
+            for b in iter_boxes(moov, parent.payload_start, parent.payload_end):
+                if b.type in ("udta", "meta"):
+                    continue
+                if b.type in ("mvhd", "tkhd", "mdhd"):
+                    out += _zero_times(moov, b)
+                elif b.type == "trak":
+                    idx = traks.index(next(t for t in traks if t.start == b.start))
+                    out += _box("trak", rebuild(b, base, idx))
+                elif b.type in ("mdia", "minf"):
+                    out += _box(b.type, rebuild(b, base, track_idx))
+                elif b.type == "stbl":
+                    out += _box("stbl", stbl_bytes(track_idx, base))
+                else:
+                    out += bytes(moov[b.start:b.end])
+            return out
+
+        head = ftyp_bytes + _box("free", b"")
+        probe = _box("moov", rebuild(mbox, 0))
+        base = len(head) + len(probe) + 8
+        mdat_size = 8 + rel + len(SILENT_FILLER)
+        if base + mdat_size >= 1 << 32:
+            raise MP4Error("output over 4 GB is not supported")
+        new_moov = _box("moov", rebuild(mbox, base))
+        if len(new_moov) != len(probe):
+            raise MP4Error("index size changed unexpectedly")
+
+        with open(dst_path, "wb") as out:
+            out.write(head + new_moov + _p32(mdat_size) + b"mdat")
+            run = None
+            for i, ss in chunks:
+                for s in ss:
+                    o, n = tracks[i]["offs"][s], tracks[i]["sizes"][s]
+                    if run and run[0] + run[1] == o:
+                        run[1] += n
+                    else:
+                        if run:
+                            f.seek(run[0]); out.write(f.read(run[1]))
+                        run = [o, n]
+            if run:
+                f.seek(run[0]); out.write(f.read(run[1]))
+            out.write(SILENT_FILLER)
+    return {"frames": len(v["sizes"]), "fakes": n_fake, "tracks": len(tracks)}
