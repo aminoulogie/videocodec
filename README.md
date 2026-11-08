@@ -30,3 +30,16 @@ artifact and publishes the release named after `VERSION` (bump it for a new rele
 python pc/tiktok_prep.py --patch hike.mov hike_patched.mp4
 python pc/tiktok_app.py        # web page on http://localhost:8765 (phone: same Wi-Fi)
 ```
+
+**If one method stops working:** TikTok changes how it handles uploads often, so a single trick does not last.
+The PC tool has three, all of which copy the video bit for bit and change only the container:
+```
+python pc/tiktok_prep.py --method all hike.mov hike.mp4   # writes hike_mvhd / hike_inflate / hike_fps
+```
+- `mvhd`: the movie header set to the longest duration (the original method here).
+- `inflate`: NoBlur style, tiny filler video samples so the file reads as very high density.
+- `fps`: a 60 fps clip reads as 30 fps (120 reads as 30), so TikTok keeps every frame.
+
+Upload each version through TikTok Studio on desktop with "Allow high-quality uploads" on, posted as Only me,
+and keep the one that stays sharp. `inflate` and `fps` come from KizaruZero/tiktok-fidelity (MIT,
+`pc/TIKTOK_FIDELITY_LICENSE.txt`) with a fix for files whose index comes last.

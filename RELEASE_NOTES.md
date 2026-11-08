@@ -1,3 +1,5 @@
+**1.6**: TikTok stopped honouring the old patch for many uploads, so there are now three methods. Patch tab: pick Header (the old one), Inflate (tiny filler samples so the file reads as very dense) or FPS (60 fps reads as 30). All of them keep the picture and sound bit for bit. If a video still comes out soft, patch it again with another method and post as Only me to compare. Same three methods on PC: `python tiktok_prep.py --method all video.mov out.mp4` (keep tiktok_methods.py next to it).
+
 **1.5**: The Accounts tab can now act on all accounts at once. Link button: open the same link in every account. Film button: pick a patched video and it is handed to TikTok Studio's upload box in every account at the same time (each account has to be logged in). Each account reports its own result on screen.
 
 **1.4**: New Accounts tab. Add as many TikTok accounts as you like, each one in its own separate container (own login, own cookies, nothing shared), and keep them all open at once. Tap a name at the bottom to switch, hold a name to delete that account and wipe its login. Needs iOS 17 or newer; on iOS 16 the tab says so and the rest of the app works as before.

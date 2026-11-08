@@ -36,7 +36,7 @@ struct VideoInfo: Equatable {
 enum Patcher {
     // MARK: reading video facts
 
-    static func info(of url: URL) async throws -> VideoInfo {
+    static func info(of url: URL, countingFrames: Bool = true) async throws -> VideoInfo {
         let asset = AVURLAsset(url: url)
         guard let track = try await asset.loadTracks(withMediaType: .video).first else {
             throw PatchError.damaged("no video track")
@@ -61,7 +61,7 @@ enum Patcher {
             v.dolbyVision = atoms.keys.contains { ["dvcC", "dvvC", "dvwC"].contains($0) }
                 || ["dvh1", "dvhe", "dva1", "dvav"].contains(v.codec)
         }
-        v.frames = try countFrames(asset: asset, track: track)
+        if countingFrames { v.frames = try countFrames(asset: asset, track: track) }
         let bytes = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? NSNumber)?
             .doubleValue ?? 0
         v.megabytes = (bytes / 1e5).rounded() / 10
@@ -91,7 +91,8 @@ enum Patcher {
 
     /// Copies `src` without re-encoding into `dst` (.mp4), patches it, and
     /// checks that nothing about the picture changed.
-    static func run(src: URL, dst: URL, step: @escaping (String) -> Void) async throws -> (VideoInfo, VideoInfo) {
+    static func run(src: URL, dst: URL, method: PatchMethod = .header,
+                    step: @escaping (String) -> Void) async throws -> (VideoInfo, VideoInfo) {
         step("Reading your video…")
         let before = try await info(of: src)
         guard ["hvc1", "hev1", "avc1", "avc3", "dvh1", "dvhe"].contains(before.codec) else {
@@ -101,18 +102,30 @@ enum Patcher {
         let copy = dst.deletingLastPathComponent().appendingPathComponent(".copy-\(UUID().uuidString).mp4")
         defer { try? FileManager.default.removeItem(at: copy) }
         try await passthrough(src: src, dst: copy)
-        step("Patching…")
+        step("Patching (\(method.title))…")
         try? FileManager.default.removeItem(at: dst)
-        try patchFile(src: copy, dst: dst)
+        switch method {
+        case .header:
+            try patchFile(src: copy, dst: dst)
+        case .inflate:
+            try Mp4.inflate(src: copy, dst: dst)
+        case .fps:
+            guard let divisor = Mp4.fpsDivider(before.fps) else {
+                throw PatchError.damaged("the FPS method needs a 60 or 120 fps video, this one is \(before.fps) fps")
+            }
+            try Mp4.fps(src: copy, dst: dst, divisor: divisor)
+        }
         step("Checking the result…")
-        let after = try await info(of: dst)
+        // Inflate adds filler samples on purpose, so its frame count is not compared.
+        let after = try await info(of: dst, countingFrames: method != .inflate)
         var bad: [String] = []
         if before.codec != after.codec { bad.append("codec") }
         if before.sizeText != after.sizeText { bad.append("size") }
-        if abs(before.fps - after.fps) > 0.05 { bad.append("frame rate") }
+        // FPS changes the frame rate the file reports on purpose; Inflate adds samples to it.
+        if method == .header && abs(before.fps - after.fps) > 0.05 { bad.append("frame rate") }
         if before.hdr != after.hdr { bad.append("HDR") }
         if before.dolbyVision != after.dolbyVision { bad.append("Dolby Vision") }
-        if before.frames != after.frames { bad.append("frame count") }
+        if method != .inflate && before.frames != after.frames { bad.append("frame count") }
         if !bad.isEmpty {
             try? FileManager.default.removeItem(at: dst)
             throw PatchError.changed(bad.joined(separator: ", "))

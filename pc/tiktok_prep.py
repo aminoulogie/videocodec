@@ -8,6 +8,14 @@
   buwryme/tiktok-lossless-upload (Editing News' method). Keeps HEVC,
   HDR and Dolby Vision. Unverified: TikTok can stop honouring it.
 
+--method NAME (copy video bit for bit, change only the container):
+  mvhd     same as --patch
+  inflate  NoBlur style: adds tiny filler video samples so the file reads
+           as very high density (needs no audio track)
+  fps      60 fps reads as 30 fps (header timing divided by 2; 120 -> 4)
+  all      writes one file per method so you can test which one TikTok
+           still honours (TikTok changes this often, results vary)
+
 - HEVC (H.265, usually HDR): lossless remux. Copies video and audio
   bit for bit, keeps HDR info, tags it hvc1, moves the index to the
   front (faststart). Nothing is re-encoded.
@@ -25,6 +33,9 @@ import struct
 import subprocess
 import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import tiktok_methods as tm
 
 HDR_TRANSFERS = {"smpte2084": "HDR10 (PQ)", "arib-std-b67": "HLG"}
 
@@ -124,9 +135,60 @@ def mvhd_patch(path):
     sys.exit("[!] no mvhd box")
 
 
+METHODS = ("mvhd", "inflate", "fps")
+
+
+def _mdat_payload(data):
+    return b"".join(data[b.payload_start:b.payload_end]
+                    for b in tm.iter_boxes(data, 0, len(data)) if b.type == "mdat")
+
+
+def build_method(method, src, dst, a):
+    """Lossless remux of src, then one container patch. Returns dst."""
+    codec = a["codec_name"]
+    if codec not in ("hevc", "h264"):
+        sys.exit(f"[!] codec {codec} not handled: export H.264 or HEVC")
+    # keep the index (moov) after the video data: every patch below expects that
+    remux(src, dst, codec, faststart=False)
+    if method == "mvhd":
+        mvhd_patch(dst)
+        return dst
+    original = Path(dst).read_bytes()
+    if method == "inflate":
+        out, rep = tm.inflate_video_samples(original, multiplier=5)
+        if not _mdat_payload(out).startswith(_mdat_payload(original)):
+            sys.exit("[!] safety check failed: original video data was not preserved")
+        print(f"       inflate: {rep['real_frames']} real frames + {rep['fake_frames']} filler samples")
+    elif method == "fps":
+        fps = a["fps"]
+        div = 2 if 55 <= fps <= 65 else 4 if 110 <= fps <= 130 else 0
+        if not div:
+            sys.exit(f"[!] fps method needs a 60 or 120 fps clip, this one is {fps:.2f}")
+        out, rep = tm.patch_fps_metadata(original, divisor=div)
+        if tm.media_payload_sha256(out) != tm.media_payload_sha256(original):
+            sys.exit("[!] safety check failed: video data changed")
+        print(f"       fps: header timing divided by {div} ({fps:.0f} reads as {fps / div:.0f})")
+    else:
+        sys.exit(f"[!] unknown method {method}")
+    Path(dst).write_bytes(out)
+    return dst
+
+
 def main():
     patch = "--patch" in sys.argv
     sys.argv = [a for a in sys.argv if a != "--patch"]
+    method = None
+    if "--method" in sys.argv:
+        i = sys.argv.index("--method")
+        try:
+            method = sys.argv[i + 1]
+        except IndexError:
+            sys.exit("[!] --method needs a name: mvhd, inflate, fps or all")
+        del sys.argv[i:i + 2]
+        if method not in METHODS + ("all",):
+            sys.exit(f"[!] unknown method {method}: use mvhd, inflate, fps or all")
+    if patch and not method:
+        method = "mvhd"
     if len(sys.argv) < 2:
         sys.exit(__doc__)
     for tool in ("ffmpeg", "ffprobe"):
@@ -145,6 +207,35 @@ def main():
     if a["fps"] < 59:
         print(f"[warn] input is {a['fps']:.2f} fps, not 60: export 60 fps from your editor first")
 
+    if method:
+        names = METHODS if method == "all" else (method,)
+        outputs = []
+        for name in names:
+            out = dst if len(names) == 1 else dst.with_name(f"{dst.stem}_{name}{dst.suffix}")
+            print(f"--method {name}: lossless copy + container patch")
+            try:
+                build_method(name, src, out, a)
+            except SystemExit as e:
+                if len(names) == 1:
+                    raise
+                print(f"[skip] {name}: {e}")
+                continue
+            b = probe(out)
+            print("output:", describe(b))
+            bad = [k for k in ["codec_name", "width", "height", "pix_fmt", "color_transfer"]
+                   if a.get(k) != b.get(k)]
+            if bad:
+                sys.exit(f"[!] output differs from input in: {', '.join(bad)}. Don't upload it.")
+            outputs.append(out)
+        if not outputs:
+            sys.exit("[!] no method could be applied to this file")
+        print("[ok] picture data untouched, same codec, size and HDR")
+        print("Upload in TikTok Studio in a desktop browser with 'Allow high-quality uploads' on.")
+        print("Post as 'Only me' first and check each version; TikTok changes this often.")
+        print("Your PC player may show a wrong length or speed for these files: that's expected.")
+        for o in outputs:
+            print(f"\n  {o}")
+        return
     if patch:
         if codec not in ("hevc", "h264"):
             sys.exit(f"[!] codec {codec} not handled: export H.264 or HEVC")

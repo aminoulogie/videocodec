@@ -21,12 +21,12 @@ enum Store {
         (try? u.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
     }
 
-    static func output(for name: String) -> URL {
+    static func output(for name: String, method: PatchMethod = .header) -> URL {
         let stem = name.components(separatedBy: CharacterSet.alphanumerics.union(.init(charactersIn: " -_")).inverted)
             .joined().trimmingCharacters(in: .whitespaces)
         let f = DateFormatter()
         f.dateFormat = "HHmmss"
-        return folder.appendingPathComponent("\(stem.isEmpty ? "video" : String(stem.prefix(40)))-\(f.string(from: Date()))_patched.mp4")
+        return folder.appendingPathComponent("\(stem.isEmpty ? "video" : String(stem.prefix(40)))-\(f.string(from: Date()))_\(method.rawValue).mp4")
     }
 }
 
@@ -38,15 +38,15 @@ final class PatchModel: ObservableObject {
     @Published var result: (before: VideoInfo, after: VideoInfo, file: URL)?
     @Published var files: [URL] = Store.list()
 
-    func patch(_ src: URL, name: String) {
+    func patch(_ src: URL, name: String, method: PatchMethod) {
         busy = true
         error = nil
         result = nil
         step = "Starting…"
-        let dst = Store.output(for: (name as NSString).deletingPathExtension)
+        let dst = Store.output(for: (name as NSString).deletingPathExtension, method: method)
         Task {
             do {
-                let (a, b) = try await Patcher.run(src: src, dst: dst) { s in
+                let (a, b) = try await Patcher.run(src: src, dst: dst, method: method) { s in
                     Task { @MainActor in self.step = s }
                 }
                 result = (a, b, dst)
@@ -70,6 +70,7 @@ struct PatchView: View {
     /// Opens TikTok Studio and puts this video in its upload box.
     var openStudio: (URL?) -> Void
     @StateObject private var model = PatchModel()
+    @AppStorage("patchMethod") private var method: PatchMethod = .header
     @State private var showPhotos = false
     @State private var showFiles = false
     @State private var share: URL?
@@ -79,6 +80,19 @@ struct PatchView: View {
     var body: some View {
         NavigationStack {
             List {
+                Section {
+                    Picker("Method", selection: $method) {
+                        ForEach(PatchMethod.allCases) { m in Text(m.title).tag(m) }
+                    }
+                    .pickerStyle(.segmented)
+                    Text(method.blurb).font(.footnote).foregroundStyle(.secondary)
+                } header: {
+                    Text("Method")
+                } footer: {
+                    Text("TikTok changes how it handles uploads often. If a patched video still comes out soft, patch it again with another method and post as Only me to compare.")
+                }
+                .disabled(model.busy)
+
                 Section {
                     Button { showPhotos = true } label: {
                         Label("Choose from Photos", systemImage: "photo.on.rectangle")
@@ -101,7 +115,7 @@ struct PatchView: View {
                 }
                 if let r = model.result {
                     Section {
-                        Label("Patched. Same frames, fps and HDR as your original.", systemImage: "checkmark.seal.fill")
+                        Label("Patched (\(method.title)). Picture and sound are the original, bit for bit.", systemImage: "checkmark.seal.fill")
                             .foregroundStyle(.green)
                         compare("Size", r.before.sizeText, r.after.sizeText)
                         compare("Frame rate", "\(r.before.fps) fps", "\(r.after.fps) fps")
@@ -158,7 +172,7 @@ struct PatchView: View {
         .sheet(isPresented: $showPhotos) {
             PhotoPicker { url, name in
                 showPhotos = false
-                if let url { model.patch(url, name: name) }
+                if let url { model.patch(url, name: name, method: method) }
             }
             .ignoresSafeArea()
         }
@@ -170,7 +184,7 @@ struct PatchView: View {
             let tmp = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + "." + url.pathExtension)
             do {
                 try FileManager.default.copyItem(at: url, to: tmp)
-                model.patch(tmp, name: url.lastPathComponent)
+                model.patch(tmp, name: url.lastPathComponent, method: method)
             } catch {
                 model.error = error.localizedDescription
             }
