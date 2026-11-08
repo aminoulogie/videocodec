@@ -39,7 +39,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           TAG="v$(tr -d ' \n' < VERSION)"
-          FILES="ios/TikTokHD.ipa pc/tiktok_prep.py pc/tiktok_app.py"
+          FILES="ios/TikTokHD.ipa pc/tiktok_prep.py pc/tiktok_methods.py pc/tiktok_app.py"
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" $FILES --clobber
             gh release edit "$TAG" --notes-file RELEASE_NOTES.md
