@@ -91,7 +91,7 @@ enum Patcher {
 
     /// Copies `src` without re-encoding into `dst` (.mp4), patches it, and
     /// checks that nothing about the picture changed.
-    static func run(src: URL, dst: URL, method: PatchMethod = .header,
+    static func run(src: URL, dst: URL, method: PatchMethod = .silent,
                     step: @escaping (String) -> Void) async throws -> (VideoInfo, VideoInfo) {
         step("Reading your video…")
         let before = try await info(of: src)
@@ -105,6 +105,8 @@ enum Patcher {
         step("Patching (\(method.title))…")
         try? FileManager.default.removeItem(at: dst)
         switch method {
+        case .silent:
+            try Mp4.silent(src: copy, dst: dst)
         case .header:
             try patchFile(src: copy, dst: dst)
         case .inflate:
@@ -116,8 +118,9 @@ enum Patcher {
             try Mp4.fps(src: copy, dst: dst, divisor: divisor)
         }
         step("Checking the result…")
-        // Inflate adds filler samples on purpose, so its frame count is not compared.
-        let after = try await info(of: dst, countingFrames: method != .inflate)
+        // Silent and Inflate add filler samples on purpose, so their frame count is not compared.
+        let addsFillers = method == .inflate || method == .silent
+        let after = try await info(of: dst, countingFrames: !addsFillers)
         var bad: [String] = []
         if before.codec != after.codec { bad.append("codec") }
         if before.sizeText != after.sizeText { bad.append("size") }
@@ -125,7 +128,7 @@ enum Patcher {
         if method == .header && abs(before.fps - after.fps) > 0.05 { bad.append("frame rate") }
         if before.hdr != after.hdr { bad.append("HDR") }
         if before.dolbyVision != after.dolbyVision { bad.append("Dolby Vision") }
-        if method != .inflate && before.frames != after.frames { bad.append("frame count") }
+        if !addsFillers && before.frames != after.frames { bad.append("frame count") }
         if !bad.isEmpty {
             try? FileManager.default.removeItem(at: dst)
             throw PatchError.changed(bad.joined(separator: ", "))

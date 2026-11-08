@@ -368,6 +368,66 @@ final class Browser: NSObject, ObservableObject, WKNavigationDelegate, WKUIDeleg
         }
     }
 
+    /// The qualities TikTok actually serves for the video open on this page. It
+    /// reads TikTok's own page data (the list of streams it offers viewers),
+    /// fetched with your login so Only me posts work too, plus the size of the
+    /// video that is playing right now. "Save video" downloads are always a
+    /// smaller copy, so this is the honest check.
+    func qualityReport() async -> String {
+        let body = """
+        var out = [];
+        var m = location.href.match(/\\/video\\/(\\d+)/);
+        if (!m) return 'Open your posted video first (the address must contain /video/), then tap Check video quality again.';
+        out.push('video id: ' + m[1]);
+        var html = null, urls = [location.origin + location.pathname, 'https://www.tiktok.com' + location.pathname];
+        for (var u of urls) {
+          try { var r = await fetch(u, { credentials: 'include' }); if (r.ok) { html = await r.text(); if (/__UNIVERSAL_DATA_FOR_REHYDRATION__|SIGI_STATE/.test(html)) break; } } catch (e) {}
+        }
+        var data = null;
+        if (html) {
+          var mm = html.match(/<script[^>]*id="__UNIVERSAL_DATA_FOR_REHYDRATION__"[^>]*>([\\s\\S]*?)<\\/script>/) || html.match(/<script[^>]*id="SIGI_STATE"[^>]*>([\\s\\S]*?)<\\/script>/);
+          if (mm) { try { data = JSON.parse(mm[1]); } catch (e) {} }
+        }
+        var video = null, seen = 0;
+        (function walk(o, depth) {
+          if (!o || typeof o !== 'object' || depth > 14 || seen > 200000) return;
+          seen++;
+          if (!video && o.id === m[1] && o.video && typeof o.video === 'object') video = o.video;
+          for (var k in o) walk(o[k], depth + 1);
+        })(data, 0);
+        if (!video) (function walk(o, depth) {
+          if (!o || typeof o !== 'object' || depth > 14 || video) return;
+          if (Array.isArray(o.bitrateInfo) || o.playAddr) { video = o; return; }
+          for (var k in o) walk(o[k], depth + 1);
+        })(data, 0);
+        var best = 0;
+        if (video) {
+          var w = video.width || 0, h = video.height || 0;
+          out.push('post: ' + w + 'x' + h + (video.ratio ? '  (' + video.ratio + ')' : '') + (video.definition ? '  definition ' + video.definition : '') + (video.codecType ? '  ' + video.codecType : '') + (video.bitrate ? '  ' + Math.round(video.bitrate / 1000) + ' kbps' : ''));
+          best = Math.min(w, h);
+          var list = video.bitrateInfo || [];
+          if (list.length) out.push('streams TikTok offers viewers:');
+          list.map(function (b) {
+            var pa = b.PlayAddr || b.playAddr || {}, bw = pa.Width || pa.width || 0, bh = pa.Height || pa.height || 0;
+            best = Math.max(best, Math.min(bw, bh));
+            return { s: Math.min(bw, bh), t: '  ' + bw + 'x' + bh + '  ' + (b.CodecType || b.codecType || '?') + '  ' + Math.round((b.Bitrate || b.bitrate || 0) / 1000) + ' kbps  ' + (b.GearName || b.gearName || '') + ((pa.DataSize || pa.dataSize) ? '  ' + ((pa.DataSize || pa.dataSize) / 1e6).toFixed(1) + ' MB' : '') };
+          }).sort(function (a, b) { return b.s - a.s; }).forEach(function (x) { out.push(x.t); });
+        } else {
+          out.push(html ? 'The TikTok page data did not include this video (it may still be processing).' : 'Could not load the video page.');
+        }
+        var d = window.__thd, vids = d ? d.deepAll(document).filter(function (el) { return el.tagName === 'VIDEO'; }) : Array.from(document.querySelectorAll('video'));
+        vids.forEach(function (v, i) { if (v.videoWidth) out.push('playing now: ' + v.videoWidth + 'x' + v.videoHeight); });
+        out.unshift(best >= 2160 ? 'RESULT: 4K stream available' : best >= 1440 ? 'RESULT: 1440p stream available' : best >= 1080 ? 'RESULT: 1080p stream available' : best > 0 ? 'RESULT: best stream is ' + best + 'p' : 'RESULT: unknown');
+        out.push('', 'Right after posting TikTok often has only low streams; check again after 10 to 30 minutes.');
+        return out.join('\\n');
+        """
+        do {
+            return (try await js(body)) as? String ?? "(no answer)"
+        } catch {
+            return "error: \(error.localizedDescription)\nurl: \(web.url?.absoluteString ?? "-")"
+        }
+    }
+
     /// What the page looks like to the app, to send when something fails.
     func pageReport() async -> String {
         let body = """
@@ -413,6 +473,7 @@ struct TikTokView: View {
     @EnvironmentObject var b: Browser
     @State private var timer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
     @State private var report: String?
+    @State private var reportTitle = "Page report"
 
     var body: some View {
         VStack(spacing: 0) {
@@ -446,8 +507,11 @@ struct TikTokView: View {
                     Button(b.desktop ? "Switch to mobile version" : "Switch to desktop version") { b.toggleDesktop() }
                     Button("Automatic (desktop only in Studio)") { b.automatic() }
                     Button("Log in page") { b.open(Browser.home) }
+                    Button("Check video quality") {
+                        Task { reportTitle = "Video quality"; report = await b.qualityReport() }
+                    }
                     Button("Page report (to send if upload fails)") {
-                        Task { report = await b.pageReport() }
+                        Task { reportTitle = "Page report"; report = await b.pageReport() }
                     }
                 } label: {
                     Image(systemName: b.desktop ? "desktopcomputer" : "iphone")
@@ -466,7 +530,7 @@ struct TikTokView: View {
                     Text(report ?? "").font(.system(.footnote, design: .monospaced)).textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading).padding()
                 }
-                .navigationTitle("Page report")
+                .navigationTitle(reportTitle)
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar {
                     ToolbarItem(placement: .confirmationAction) {

@@ -34,12 +34,16 @@ python pc/tiktok_app.py        # web page on http://localhost:8765 (phone: same 
 **If one method stops working:** TikTok changes how it handles uploads often, so a single trick does not last.
 The PC tool has three, all of which copy the video bit for bit and change only the container:
 ```
-python pc/tiktok_prep.py --method all hike.mov hike.mp4   # writes hike_mvhd / hike_inflate / hike_fps
+python pc/tiktok_prep.py --method all hike.mov hike.mp4   # writes hike_silent / hike_mvhd / hike_inflate / hike_fps
 ```
+- `silent` (recommended): index first, tracks interleaved, filler samples only in the size table,
+  bitrate box fixed, metadata removed. Written from the published description of
+  AscendedTweaks/silent-method; tests/ checks it gives the same bytes as that tool.
 - `mvhd`: the movie header set to the longest duration (the original method here).
 - `inflate`: NoBlur style, tiny filler video samples so the file reads as very high density.
 - `fps`: a 60 fps clip reads as 30 fps (120 reads as 30), so TikTok keeps every frame.
 
-Upload each version through TikTok Studio on desktop with "Allow high-quality uploads" on, posted as Only me,
+To see the real result, open the posted video in the app's TikTok tab and tap ⋯ → Check video quality
+(TikTok's "Save video" is always a smaller copy). Upload each version through TikTok Studio on desktop with "Allow high-quality uploads" on, posted as Only me,
 and keep the one that stays sharp. `inflate` and `fps` come from KizaruZero/tiktok-fidelity (MIT,
 `pc/TIKTOK_FIDELITY_LICENSE.txt`) with a fix for files whose index comes last.

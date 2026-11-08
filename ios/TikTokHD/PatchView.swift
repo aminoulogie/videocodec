@@ -21,7 +21,7 @@ enum Store {
         (try? u.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
     }
 
-    static func output(for name: String, method: PatchMethod = .header) -> URL {
+    static func output(for name: String, method: PatchMethod = .silent) -> URL {
         let stem = name.components(separatedBy: CharacterSet.alphanumerics.union(.init(charactersIn: " -_")).inverted)
             .joined().trimmingCharacters(in: .whitespaces)
         let f = DateFormatter()
@@ -70,7 +70,7 @@ struct PatchView: View {
     /// Opens TikTok Studio and puts this video in its upload box.
     var openStudio: (URL?) -> Void
     @StateObject private var model = PatchModel()
-    @AppStorage("patchMethod") private var method: PatchMethod = .header
+    @AppStorage("patchMethod2") private var method: PatchMethod = .silent
     @State private var showPhotos = false
     @State private var showFiles = false
     @State private var share: URL?
@@ -89,7 +89,7 @@ struct PatchView: View {
                 } header: {
                     Text("Method")
                 } footer: {
-                    Text("TikTok changes how it handles uploads often. If a patched video still comes out soft, patch it again with another method and post as Only me to compare.")
+                    Text("To judge the result, open your posted video in the TikTok tab and tap ⋯ → Check video quality. TikTok's Save video always gives a smaller copy, so it can't tell you how your post really looks.")
                 }
                 .disabled(model.busy)
 

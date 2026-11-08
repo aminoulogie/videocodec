@@ -9,6 +9,9 @@
   HDR and Dolby Vision. Unverified: TikTok can stop honouring it.
 
 --method NAME (copy video bit for bit, change only the container):
+  silent   recommended: index first, tracks interleaved, filler samples
+           listed only in the size table, bitrate box fixed, metadata removed
+           (the Silent Method layout, Nov 2026)
   mvhd     same as --patch
   inflate  NoBlur style: adds tiny filler video samples so the file reads
            as very high density (needs no audio track)
@@ -135,7 +138,7 @@ def mvhd_patch(path):
     sys.exit("[!] no mvhd box")
 
 
-METHODS = ("mvhd", "inflate", "fps")
+METHODS = ("silent", "mvhd", "inflate", "fps")
 
 
 def _mdat_payload(data):
@@ -152,6 +155,17 @@ def build_method(method, src, dst, a):
     remux(src, dst, codec, faststart=False)
     if method == "mvhd":
         mvhd_patch(dst)
+        return dst
+    if method == "silent":
+        tmp = Path(dst).with_name(Path(dst).stem + ".remux.mp4")
+        Path(dst).replace(tmp)
+        try:
+            rep = tm.silent_layout(str(tmp), str(dst))
+        except tm.MP4Error as e:
+            sys.exit(f"[!] silent: {e}")
+        finally:
+            tmp.unlink(missing_ok=True)
+        print(f"       silent: {rep['frames']} frames + {rep['fakes']} filler samples, index first, tracks interleaved")
         return dst
     original = Path(dst).read_bytes()
     if method == "inflate":
@@ -183,10 +197,10 @@ def main():
         try:
             method = sys.argv[i + 1]
         except IndexError:
-            sys.exit("[!] --method needs a name: mvhd, inflate, fps or all")
+            sys.exit("[!] --method needs a name: silent, mvhd, inflate, fps or all")
         del sys.argv[i:i + 2]
         if method not in METHODS + ("all",):
-            sys.exit(f"[!] unknown method {method}: use mvhd, inflate, fps or all")
+            sys.exit(f"[!] unknown method {method}: use silent, mvhd, inflate, fps or all")
     if patch and not method:
         method = "mvhd"
     if len(sys.argv) < 2:
