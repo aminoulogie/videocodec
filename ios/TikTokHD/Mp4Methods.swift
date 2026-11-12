@@ -733,4 +733,73 @@ enum Mp4 {
         try out.write(contentsOf: Data(silentFiller))
         return (v.sizes.count, nFake)
     }
+
+    // MARK: checking a Silent result
+
+    /// Apple's video reader (AVFoundation) refuses the video track of a Silent file: its size
+    /// table lists the filler samples, its time table doesn't, so it reports "no video track".
+    /// This checks the result with our own reader instead: the same tracks, every real sample
+    /// the same bytes in the same order, and the video's description (codec, size, HDR, Dolby
+    /// Vision boxes) the same apart from the pasp/btrt boxes Silent sets. Returns the video's
+    /// real frame count.
+    @discardableResult
+    static func silentCheck(original: URL, patched: URL) throws -> Int {
+        func load(_ u: URL) throws -> (FileHandle, [UInt8], [Box], [SilentTrack]) {
+            let fh = try FileHandle(forReadingFrom: u)
+            let tops = try topBoxes(fh)
+            guard let mv = tops.first(where: { $0.type == "moov" }), mv.header == 8 else {
+                try? fh.close()
+                throw PatchError.changed("index (moov) missing")
+            }
+            try fh.seek(toOffset: UInt64(mv.offset))
+            guard let d = try fh.read(upToCount: mv.size), d.count == mv.size else {
+                try? fh.close()
+                throw PatchError.changed("index (moov) short")
+            }
+            let m = [UInt8](d)
+            let traks = try children(m, 8, m.count).filter { $0.type == "trak" }
+            return (fh, m, traks, try traks.map { try silentTrack(m, $0) })
+        }
+        let (fa, ma, _, ta) = try load(original)
+        defer { try? fa.close() }
+        let (fb, mb, _, tb) = try load(patched)
+        defer { try? fb.close() }
+        guard ta.count == tb.count else { throw PatchError.changed("number of tracks") }
+        guard let vi = ta.firstIndex(where: { $0.handler == "vide" }), tb[vi].handler == "vide" else {
+            throw PatchError.changed("video track")
+        }
+        // the video's description
+        func desc(_ m: [UInt8], _ tr: SilentTrack) throws -> (String, [UInt8], [[UInt8]]) {
+            guard let stsd = try children(m, tr.stbl.body, tr.stbl.end).first(where: { $0.type == "stsd" }) else {
+                throw PatchError.changed("sample description")
+            }
+            let p = stsd.body, es = p + 16, ee = p + 8 + u32(m, p + 8)
+            guard ee <= stsd.end, es + 78 <= ee else { throw PatchError.changed("sample description") }
+            let kids = try children(m, es + 78, ee).filter { $0.type != "pasp" && $0.type != "btrt" }
+            return (fourcc(m, p + 12), Array(m[es ..< es + 78]), kids.map { Array(m[$0.offset ..< $0.end]) })
+        }
+        let (ca, ha, ka) = try desc(ma, ta[vi]), (cb, hb, kb) = try desc(mb, tb[vi])
+        if ca != cb { throw PatchError.changed("codec") }
+        if ha != hb { throw PatchError.changed("size") }
+        if ka != kb { throw PatchError.changed("HDR / Dolby Vision / codec settings") }
+        // every real sample, byte for byte
+        func readAt(_ fh: FileHandle, _ o: UInt64, _ n: Int) throws -> Data {
+            try fh.seek(toOffset: o)
+            guard let d = try fh.read(upToCount: n), d.count == n else { throw PatchError.changed("sample data short") }
+            return d
+        }
+        for i in 0 ..< ta.count {
+            let a = ta[i], b = tb[i]
+            if a.handler != b.handler { throw PatchError.changed("track \(i + 1) type") }
+            if a.sizes != b.sizes || a.deltas.count != b.deltas.count {
+                throw PatchError.changed(i == vi ? "frame count" : "sound samples")
+            }
+            for s in 0 ..< a.sizes.count where a.sizes[s] > 0 {
+                if try readAt(fa, a.offs[s], a.sizes[s]) != readAt(fb, b.offs[s], b.sizes[s]) {
+                    throw PatchError.changed(i == vi ? "picture data (frame \(s + 1))" : "sound data")
+                }
+            }
+        }
+        return ta[vi].sizes.count
+    }
 }
