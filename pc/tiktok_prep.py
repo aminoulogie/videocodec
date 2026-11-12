@@ -19,6 +19,19 @@
   all      writes one file per method so you can test which one TikTok
            still honours (TikTok changes this often, results vary)
 
+--prepare (optional, runs before the method; the only mode that re-encodes):
+  what the 4K / 120 fps posters do before patching (HandBrake step):
+  a clean constant-frame-rate encode with a keyframe every second, so
+  the container patch has a regular file to work on and TikTok's own
+  encoder has an easy source if it ignores the patch.
+  SDR -> H.264 CRF 18, HDR -> HEVC 10-bit CRF 18 (HDR10 / HLG kept,
+  Dolby Vision is lost). Without --method it uses silent.
+    --codec h264|hevc   force the codec (HDR always uses hevc)
+    --crf N             quality, lower = better and bigger (default 18)
+    --1080              scale down to 1080p (the most reliable size)
+    --clean             light denoise + sharpen (only helps when TikTok
+                        still compresses the video; leave off otherwise)
+
 - HEVC (H.265, usually HDR): lossless remux. Copies video and audio
   bit for bit, keeps HDR info, tags it hvc1, moves the index to the
   front (faststart). Nothing is re-encoded.
