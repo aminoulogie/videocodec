@@ -43,6 +43,25 @@ python pc/tiktok_prep.py --method all hike.mov hike.mp4   # writes hike_silent /
 - `inflate`: NoBlur style, tiny filler video samples so the file reads as very high density. Not recommended: each filler takes a frame's time, so the video track runs ~5x longer than the clip and TikTok can turn it into slow motion.
 - `fps`: a 60 fps clip reads as 30 fps (120 reads as 30), so TikTok keeps every frame.
 
+**Prepare (optional, PC only):** the people posting 4K / 120 fps re-encode in HandBrake before patching.
+`--prepare` does that step for you, then patches:
+```
+python pc/tiktok_prep.py --prepare hike.mov hike.mp4                 # re-encode, then Silent
+python pc/tiktok_prep.py --prepare --method all hike.mov hike.mp4    # re-encode, then one file per method
+python pc/tiktok_prep.py --prepare --1080 --method fps clip120.mp4 out.mp4
+```
+It writes a regular file: constant frame rate, a keyframe every second, H.264 CRF 18 (HEVC 10-bit for
+HDR; Dolby Vision is lost). `--1080` scales down to 1080p, the size that holds best. `--clean` adds a
+light denoise and sharpen, useful only when TikTok still compresses the video. `--codec hevc` and
+`--crf N` change the encode. Without `--prepare` nothing is ever re-encoded.
+
+A 4K / 120 fps post that plays frame by frame is TikTok serving the uploaded file itself: phones
+struggle to decode it. 1080p at 60 or 120 fps plays smoothly and still looks sharp.
+
+When posting: no TikTok sound, no trim, no filter (any edit makes TikTok encode the video again). If
+an Only me test comes out soft, test with a public post: some method authors say private posts get
+compressed.
+
 To see the real result, open the posted video in the app's TikTok tab and tap ⋯ → Check video quality
 (TikTok's "Save video" is always a smaller copy). Upload each version through TikTok Studio on desktop with "Allow high-quality uploads" on, posted as Only me,
 and keep the one that stays sharp. `inflate` and `fps` come from KizaruZero/tiktok-fidelity (MIT,
