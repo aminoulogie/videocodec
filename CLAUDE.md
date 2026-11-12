@@ -21,3 +21,5 @@ that patch videos so TikTok keeps their quality. See README.md.
   `webViewWebContentProcessDidTerminate` reports it and ⋯ → Page report lists reloads/crashes.
 - Verify Swift changes with the workflow (workflow_dispatch on the branch) before merging:
   no Swift compiler in the cloud sessions.
+- `--prepare` (PC, 1.9) is the only mode that re-encodes; every method stays a bit for bit copy of
+  its input. Not in the iPhone app or tiktok_app.py yet.
