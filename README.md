@@ -9,7 +9,7 @@ patcher). Upload the result through **TikTok Studio's desktop version**. TikTok 
 at any time.
 
 ## iPhone app (`ios/`)
-Download **TikTokHD.ipa** from [Releases](../../releases), install it with
+Download **TikTokHD-<version>.ipa** (e.g. TikTokHD-1.8.1.ipa) from [Releases](../../releases), install it with
 [Sideloadly](https://sideloadly.io) on Windows (needs Apple's iTunes from apple.com, a cable and an
 Apple ID). On the iPhone: Settings > Privacy & Security > Developer Mode on, then trust the app in
 Settings > General > VPN & Device Management. Free Apple ID: install again every 7 days.

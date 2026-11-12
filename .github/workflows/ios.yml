@@ -51,8 +51,14 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          TAG="v$(tr -d ' \n' < VERSION)"
-          FILES="ios/TikTokHD.ipa pc/tiktok_prep.py pc/tiktok_methods.py pc/tiktok_app.py"
+          V="$(tr -d ' \n' < VERSION)"
+          TAG="v$V"
+          # every release file ends with the version (no " 2" copies when downloading a new one)
+          mkdir -p dist
+          cp ios/TikTokHD.ipa "dist/TikTokHD-$V.ipa"
+          # the PC files import each other by name, so they go in one versioned zip
+          (cd pc && zip -q "../dist/TikTokHD-PC-$V.zip" tiktok_prep.py tiktok_methods.py tiktok_app.py TIKTOK_FIDELITY_LICENSE.txt)
+          FILES="dist/TikTokHD-$V.ipa dist/TikTokHD-PC-$V.zip"
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" $FILES --clobber
             gh release edit "$TAG" --notes-file RELEASE_NOTES.md
