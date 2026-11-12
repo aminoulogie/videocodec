@@ -91,12 +91,27 @@ enum Patcher {
 
     /// Copies `src` without re-encoding into `dst` (.mp4), patches it, and
     /// checks that nothing about the picture changed.
-    static func run(src: URL, dst: URL, method: PatchMethod = .silent,
+    /// With `prepare`, the video is first re-encoded into a regular file (see
+    /// Prepare.swift) and that file is the one patched and checked; the first
+    /// VideoInfo returned is still the video the user picked.
+    static func run(src: URL, dst: URL, method: PatchMethod = .silent, prepare: PrepareOptions? = nil,
                     step: @escaping (String) -> Void) async throws -> (VideoInfo, VideoInfo) {
         step("Reading your video…")
-        let before = try await info(of: src)
+        var src = src
+        let original = try await info(of: src)
+        var before = original
+        let prepared = dst.deletingLastPathComponent().appendingPathComponent(".prep-\(UUID().uuidString).mp4")
+        defer { try? FileManager.default.removeItem(at: prepared) }
+        if let prepare {
+            step("Re-encoding… 0%")
+            try await Prepare.encode(src: src, dst: prepared, options: prepare) { percent in
+                step("Re-encoding… \(percent)%")
+            }
+            src = prepared
+            before = try await info(of: prepared)
+        }
         guard ["hvc1", "hev1", "avc1", "avc3", "dvh1", "dvhe"].contains(before.codec) else {
-            throw PatchError.damaged("codec \(before.codec) — export H.264 or HEVC from your editor")
+            throw PatchError.damaged("codec \(before.codec) — export H.264 or HEVC from your editor, or turn on Prepare")
         }
         step("Copying without re-encoding…")
         let copy = dst.deletingLastPathComponent().appendingPathComponent(".copy-\(UUID().uuidString).mp4")
@@ -132,7 +147,7 @@ enum Patcher {
                 .doubleValue ?? 0
             after.megabytes = (bytes / 1e5).rounded() / 10
             if before.megabytes > 0 { after.mbps = (before.mbps * after.megabytes / before.megabytes * 10).rounded() / 10 }
-            return (before, after)
+            return (original, after)
         }
         // Inflate adds filler samples on purpose, so its frame count is not compared.
         let addsFillers = method == .inflate || method == .silent
@@ -149,7 +164,7 @@ enum Patcher {
             try? FileManager.default.removeItem(at: dst)
             throw PatchError.changed(bad.joined(separator: ", "))
         }
-        return (before, after)
+        return (original, after)
     }
 
     private static func passthrough(src: URL, dst: URL) async throws {

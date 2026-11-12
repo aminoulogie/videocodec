@@ -21,12 +21,12 @@ enum Store {
         (try? u.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
     }
 
-    static func output(for name: String, method: PatchMethod = .silent) -> URL {
+    static func output(for name: String, method: PatchMethod = .silent, prepared: Bool = false) -> URL {
         let stem = name.components(separatedBy: CharacterSet.alphanumerics.union(.init(charactersIn: " -_")).inverted)
             .joined().trimmingCharacters(in: .whitespaces)
         let f = DateFormatter()
         f.dateFormat = "HHmmss"
-        return folder.appendingPathComponent("\(stem.isEmpty ? "video" : String(stem.prefix(40)))-\(f.string(from: Date()))_\(method.rawValue).mp4")
+        return folder.appendingPathComponent("\(stem.isEmpty ? "video" : String(stem.prefix(40)))-\(f.string(from: Date()))_\(prepared ? "prep_" : "")\(method.rawValue).mp4")
     }
 }
 
@@ -35,25 +35,28 @@ final class PatchModel: ObservableObject {
     @Published var busy = false
     @Published var step = ""
     @Published var error: String?
-    @Published var result: (before: VideoInfo, after: VideoInfo, file: URL)?
+    @Published var result: (before: VideoInfo, after: VideoInfo, file: URL, prepared: Bool)?
     @Published var files: [URL] = Store.list()
 
-    func patch(_ src: URL, name: String, method: PatchMethod) {
+    func patch(_ src: URL, name: String, method: PatchMethod, prepare: PrepareOptions? = nil) {
         busy = true
         error = nil
         result = nil
         step = "Starting…"
-        let dst = Store.output(for: (name as NSString).deletingPathExtension, method: method)
+        let dst = Store.output(for: (name as NSString).deletingPathExtension, method: method, prepared: prepare != nil)
+        // Re-encoding a long video takes a while: keep the screen on meanwhile.
+        UIApplication.shared.isIdleTimerDisabled = true
         Task {
             do {
-                let (a, b) = try await Patcher.run(src: src, dst: dst, method: method) { s in
+                let (a, b) = try await Patcher.run(src: src, dst: dst, method: method, prepare: prepare) { s in
                     Task { @MainActor in self.step = s }
                 }
-                result = (a, b, dst)
+                result = (a, b, dst, prepare != nil)
             } catch {
                 self.error = error.localizedDescription
             }
             try? FileManager.default.removeItem(at: src)
+            UIApplication.shared.isIdleTimerDisabled = false
             busy = false
             files = Store.list()
         }
@@ -71,11 +74,17 @@ struct PatchView: View {
     var openStudio: (URL?) -> Void
     @StateObject private var model = PatchModel()
     @AppStorage("patchMethod2") private var method: PatchMethod = .silent
+    @AppStorage("prepareFirst") private var prepareFirst = false
+    @AppStorage("prepare1080") private var prepare1080 = false
     @State private var showPhotos = false
     @State private var showFiles = false
     @State private var share: URL?
     @State private var exportFile: URL?
     @State private var saveNote: String?
+
+    private var prepareOptions: PrepareOptions? {
+        prepareFirst ? PrepareOptions(to1080: prepare1080) : nil
+    }
 
     var body: some View {
         NavigationStack {
@@ -94,6 +103,18 @@ struct PatchView: View {
                 .disabled(model.busy)
 
                 Section {
+                    Toggle("Prepare first (re-encode)", isOn: $prepareFirst)
+                    if prepareFirst {
+                        Toggle("Scale to 1080p", isOn: $prepare1080)
+                    }
+                } header: {
+                    Text("Prepare")
+                } footer: {
+                    Text("Off: nothing is re-encoded. On: the video is re-encoded once into a regular file (steady frame rate, a keyframe every second) and then patched, the way the 4K / 120 fps posters do it. Slower, keeps HDR, loses Dolby Vision. Keep the app open while it works. 1080p holds best on TikTok and plays smoothly.")
+                }
+                .disabled(model.busy)
+
+                Section {
                     Button { showPhotos = true } label: {
                         Label("Choose from Photos", systemImage: "photo.on.rectangle")
                     }
@@ -103,7 +124,8 @@ struct PatchView: View {
                 } header: {
                     Text("1 · Patch a video")
                 } footer: {
-                    Text("Keeps 4K, 60 fps, HDR and Dolby Vision. Nothing is re-encoded.")
+                    Text(prepareFirst ? "Re-encoded once (Prepare is on), then patched. Keeps the frame rate and HDR."
+                         : "Keeps 4K, 60 fps, HDR and Dolby Vision. Nothing is re-encoded.")
                 }
                 .disabled(model.busy)
 
@@ -115,7 +137,8 @@ struct PatchView: View {
                 }
                 if let r = model.result {
                     Section {
-                        Label("Patched (\(method.title)). Picture and sound are the original, bit for bit.", systemImage: "checkmark.seal.fill")
+                        Label(r.prepared ? "Prepared and patched (\(method.title)). Re-encoded once, then patched without touching the new picture."
+                              : "Patched (\(method.title)). Picture and sound are the original, bit for bit.", systemImage: "checkmark.seal.fill")
                             .foregroundStyle(.green)
                         compare("Size", r.before.sizeText, r.after.sizeText)
                         compare("Frame rate", "\(r.before.fps) fps", "\(r.after.fps) fps")
@@ -144,7 +167,7 @@ struct PatchView: View {
                     } header: {
                         Text("3 · Upload")
                     } footer: {
-                        Text("Opens TikTok Studio and puts \(r.file.lastPathComponent) in its upload box by itself. If it can't, tap Select video → Choose File → Browse → On My iPhone → TikTok HD. Don't pick it from Photos (iOS would compress it). Don't trim it in TikTok. First time, post as Only me to check.")
+                        Text("Opens TikTok Studio and puts \(r.file.lastPathComponent) in its upload box by itself. If it can't, tap Select video → Choose File → Browse → On My iPhone → TikTok HD. Don't pick it from Photos (iOS would compress it). Don't trim it or add a sound or filter in TikTok. First time, post as Only me to check; if that comes out soft, try a public post.")
                     }
                 }
 
@@ -172,7 +195,7 @@ struct PatchView: View {
         .sheet(isPresented: $showPhotos) {
             PhotoPicker { url, name in
                 showPhotos = false
-                if let url { model.patch(url, name: name, method: method) }
+                if let url { model.patch(url, name: name, method: method, prepare: prepareOptions) }
             }
             .ignoresSafeArea()
         }
@@ -184,7 +207,7 @@ struct PatchView: View {
             let tmp = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + "." + url.pathExtension)
             do {
                 try FileManager.default.copyItem(at: url, to: tmp)
-                model.patch(tmp, name: url.lastPathComponent, method: method)
+                model.patch(tmp, name: url.lastPathComponent, method: method, prepare: prepareOptions)
             } catch {
                 model.error = error.localizedDescription
             }

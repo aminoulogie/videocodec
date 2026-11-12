@@ -43,7 +43,7 @@ python pc/tiktok_prep.py --method all hike.mov hike.mp4   # writes hike_silent /
 - `inflate`: NoBlur style, tiny filler video samples so the file reads as very high density. Not recommended: each filler takes a frame's time, so the video track runs ~5x longer than the clip and TikTok can turn it into slow motion.
 - `fps`: a 60 fps clip reads as 30 fps (120 reads as 30), so TikTok keeps every frame.
 
-**Prepare (optional, PC only):** the people posting 4K / 120 fps re-encode in HandBrake before patching.
+**Prepare (optional):** on iPhone it is the Prepare first switch in the Patch tab (with Scale to 1080p). On PC: the people posting 4K / 120 fps re-encode in HandBrake before patching.
 `--prepare` does that step for you, then patches:
 ```
 python pc/tiktok_prep.py --prepare hike.mov hike.mp4                 # re-encode, then Silent
