@@ -267,8 +267,34 @@ def main():
         del sys.argv[i:i + 2]
         if method not in METHODS + ("all",):
             sys.exit(f"[!] unknown method {method}: use silent, mvhd, inflate, fps or all")
+    opts = {"prepare": False, "to1080": False, "clean": False, "codec": None, "crf": 18}
+    for flag, key in (("--prepare", "prepare"), ("--1080", "to1080"), ("--clean", "clean")):
+        if flag in sys.argv:
+            opts[key] = True
+            sys.argv.remove(flag)
+    for flag in ("--codec", "--crf"):
+        if flag in sys.argv:
+            i = sys.argv.index(flag)
+            try:
+                val = sys.argv[i + 1]
+            except IndexError:
+                sys.exit(f"[!] {flag} needs a value")
+            del sys.argv[i:i + 2]
+            if flag == "--codec":
+                val = {"h265": "hevc", "x265": "hevc", "x264": "h264"}.get(val.lower(), val.lower())
+                if val not in ("h264", "hevc"):
+                    sys.exit("[!] --codec: use h264 or hevc")
+                opts["codec"] = val
+            else:
+                if not val.isdigit() or not 0 <= int(val) <= 40:
+                    sys.exit("[!] --crf: use a number from 0 to 40 (18 is the default)")
+                opts["crf"] = int(val)
+    if not opts["prepare"] and (opts["to1080"] or opts["clean"] or opts["codec"] or opts["crf"] != 18):
+        sys.exit("[!] --1080, --clean, --codec and --crf only work together with --prepare")
     if patch and not method:
         method = "mvhd"
+    if opts["prepare"] and not method:
+        method = "silent"
     if len(sys.argv) < 2:
         sys.exit(__doc__)
     for tool in ("ffmpeg", "ffprobe"):
