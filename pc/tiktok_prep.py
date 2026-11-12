@@ -19,6 +19,19 @@
   all      writes one file per method so you can test which one TikTok
            still honours (TikTok changes this often, results vary)
 
+--prepare (optional, runs before the method; the only mode that re-encodes):
+  what the 4K / 120 fps posters do before patching (HandBrake step):
+  a clean constant-frame-rate encode with a keyframe every second, so
+  the container patch has a regular file to work on and TikTok's own
+  encoder has an easy source if it ignores the patch.
+  SDR -> H.264 CRF 18, HDR -> HEVC 10-bit CRF 18 (HDR10 / HLG kept,
+  Dolby Vision is lost). Without --method it uses silent.
+    --codec h264|hevc   force the codec (HDR always uses hevc)
+    --crf N             quality, lower = better and bigger (default 18)
+    --1080              scale down to 1080p (the most reliable size)
+    --clean             light denoise + sharpen (only helps when TikTok
+                        still compresses the video; leave off otherwise)
+
 - HEVC (H.265, usually HDR): lossless remux. Copies video and audio
   bit for bit, keeps HDR info, tags it hvc1, moves the index to the
   front (faststart). Nothing is re-encoded.
@@ -90,6 +103,59 @@ def remux(src, dst, codec, faststart=True):
     if codec == "hevc":
         cmd += ["-tag:v", "hvc1"]
     run(cmd + [str(dst)])
+
+
+def std_fps(fps):
+    """Nearest standard rate as (text for ffmpeg, frames per second)."""
+    table = [("24000/1001", 23.976), ("24", 24), ("25", 25), ("30000/1001", 29.97),
+             ("30", 30), ("50", 50), ("60000/1001", 59.94), ("60", 60),
+             ("120000/1001", 119.88), ("120", 120)]
+    best = min(table, key=lambda t: abs(t[1] - fps))
+    if abs(best[1] - fps) > 1.5:
+        return f"{fps:.3f}", fps
+    return best
+
+
+def prepare(src, dst, a, codec=None, crf=18, to1080=False, clean=False):
+    """Re-encode src into a regular file: constant frame rate, one closed GOP
+    per second, standard pixel format, AAC sound. Returns the codec used."""
+    hdr = a.get("color_transfer") in HDR_TRANSFERS
+    if hdr:
+        if codec == "h264":
+            print("[warn] HDR needs HEVC: using hevc instead of h264")
+        codec = "hevc"
+    codec = codec or "h264"
+    rate, fps = std_fps(a["fps"])
+    gop = max(1, round(fps))
+    vf = []
+    if to1080 and min(a["width"], a["height"]) > 1080:
+        vf.append("scale='if(gt(iw,ih),-2,1080)':'if(gt(iw,ih),1080,-2)':flags=lanczos")
+    if clean:
+        vf += ["hqdn3d=1.5:1.5:4:4", "unsharp=5:5:0.4:5:5:0.0"]
+    cmd = ["ffmpeg", "-v", "error", "-y", "-i", str(src), "-map", "0:v:0", "-map", "0:a:0?",
+           "-map_metadata", "-1", "-fps_mode", "cfr", "-r", rate]
+    if vf:
+        cmd += ["-vf", ",".join(vf)]
+    if codec == "hevc":
+        x = [f"keyint={gop}", f"min-keyint={gop}", "open-gop=0", "scenecut=0", "log-level=error"]
+        cmd += ["-c:v", "libx265", "-preset", "slow", "-crf", str(crf), "-tag:v", "hvc1"]
+        if hdr:
+            trc = a["color_transfer"]
+            x += ["repeat-headers=1", "colorprim=bt2020", f"transfer={trc}", "colormatrix=bt2020nc"]
+            if trc == "smpte2084":
+                x.append("hdr10-opt=1")
+            cmd += ["-pix_fmt", "yuv420p10le", "-color_primaries", "bt2020",
+                    "-color_trc", trc, "-colorspace", "bt2020nc"]
+        else:
+            cmd += ["-pix_fmt", "yuv420p"]
+        cmd += ["-x265-params", ":".join(x)]
+    else:
+        cmd += ["-c:v", "libx264", "-preset", "slow", "-crf", str(crf), "-pix_fmt", "yuv420p",
+                "-profile:v", "high", "-g", str(gop), "-keyint_min", str(gop),
+                "-sc_threshold", "0", "-flags", "+cgop"]
+    cmd += ["-c:a", "aac", "-b:a", "320k", "-ar", "48000", str(dst)]
+    run(cmd)
+    return codec
 
 
 def boxes(buf, start, end):
@@ -201,8 +267,34 @@ def main():
         del sys.argv[i:i + 2]
         if method not in METHODS + ("all",):
             sys.exit(f"[!] unknown method {method}: use silent, mvhd, inflate, fps or all")
+    opts = {"prepare": False, "to1080": False, "clean": False, "codec": None, "crf": 18}
+    for flag, key in (("--prepare", "prepare"), ("--1080", "to1080"), ("--clean", "clean")):
+        if flag in sys.argv:
+            opts[key] = True
+            sys.argv.remove(flag)
+    for flag in ("--codec", "--crf"):
+        if flag in sys.argv:
+            i = sys.argv.index(flag)
+            try:
+                val = sys.argv[i + 1]
+            except IndexError:
+                sys.exit(f"[!] {flag} needs a value")
+            del sys.argv[i:i + 2]
+            if flag == "--codec":
+                val = {"h265": "hevc", "x265": "hevc", "x264": "h264"}.get(val.lower(), val.lower())
+                if val not in ("h264", "hevc"):
+                    sys.exit("[!] --codec: use h264 or hevc")
+                opts["codec"] = val
+            else:
+                if not val.isdigit() or not 0 <= int(val) <= 40:
+                    sys.exit("[!] --crf: use a number from 0 to 40 (18 is the default)")
+                opts["crf"] = int(val)
+    if not opts["prepare"] and (opts["to1080"] or opts["clean"] or opts["codec"] or opts["crf"] != 18):
+        sys.exit("[!] --1080, --clean, --codec and --crf only work together with --prepare")
     if patch and not method:
         method = "mvhd"
+    if opts["prepare"] and not method:
+        method = "silent"
     if len(sys.argv) < 2:
         sys.exit(__doc__)
     for tool in ("ffmpeg", "ffprobe"):
@@ -221,6 +313,28 @@ def main():
     if a["fps"] < 59:
         print(f"[warn] input is {a['fps']:.2f} fps, not 60: export 60 fps from your editor first")
 
+    prepared = None
+    if opts["prepare"]:
+        prepared = dst.with_name(dst.stem + ".prepared.mp4")
+        if prepared.resolve() == src.resolve():
+            sys.exit("[!] output must be a different file")
+        print("--prepare: re-encoding (this is the slow part)...")
+        if any("DOVI" in x for x in a["side"]):
+            print("[warn] Dolby Vision is lost by --prepare (plain HDR is kept)")
+        frames = a["frames"]
+        prepare(src, prepared, a, opts["codec"], opts["crf"], opts["to1080"], opts["clean"])
+        src, a = prepared, probe(prepared)
+        print("prepared:", describe(a))
+        if frames and abs(a["frames"] - frames) > max(2, frames * 0.02):
+            print(f"[note] the source had an uneven frame rate: {frames} frames became {a['frames']}")
+    try:
+        _patch_and_report(method, patch, src, dst, a, codec=a["codec_name"])
+    finally:
+        if prepared:
+            prepared.unlink(missing_ok=True)
+
+
+def _patch_and_report(method, patch, src, dst, a, codec):
     if method:
         names = METHODS if method == "all" else (method,)
         outputs = []
@@ -246,6 +360,8 @@ def main():
         print("[ok] picture data untouched, same codec, size and HDR")
         print("Upload in TikTok Studio in a desktop browser with 'Allow high-quality uploads' on.")
         print("Post as 'Only me' first and check each version; TikTok changes this often.")
+        print("If an 'Only me' post comes out soft, try a public one: some method authors say")
+        print("private posts get compressed. Never add a TikTok sound, trim or filter while posting.")
         print("Your PC player may show a wrong length or speed for these files: that's expected.")
         for o in outputs:
             print(f"\n  {o}")
