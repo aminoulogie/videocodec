@@ -25,7 +25,7 @@ enum PatchMethod: String, CaseIterable, Identifiable {
         case .header:
             return "Sets the movie length to the longest possible. The original trick."
         case .inflate:
-            return "Adds tiny filler samples so the file reads as very dense. Try this when Header stops working."
+            return "Not recommended: can come out in slow motion. Adds filler frames after the real ones, so the video track runs about 5 times longer than the clip and TikTok may stretch the real frames over it. Use Silent instead."
         case .fps:
             return "A 60 fps clip reads as 30 fps (120 as 30). It may look slowed down on this phone; TikTok keeps every frame."
         }
