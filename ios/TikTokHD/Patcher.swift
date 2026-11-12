@@ -118,7 +118,23 @@ enum Patcher {
             try Mp4.fps(src: copy, dst: dst, divisor: divisor)
         }
         step("Checking the result…")
-        // Silent and Inflate add filler samples on purpose, so their frame count is not compared.
+        if method == .silent {
+            // Apple's reader refuses Silent's video track (filler samples), so it's checked
+            // with our own reader: same tracks, same description, every frame byte for byte.
+            do {
+                try Mp4.silentCheck(original: copy, patched: dst)
+            } catch {
+                try? FileManager.default.removeItem(at: dst)
+                throw error
+            }
+            var after = before
+            let bytes = (try? FileManager.default.attributesOfItem(atPath: dst.path)[.size] as? NSNumber)?
+                .doubleValue ?? 0
+            after.megabytes = (bytes / 1e5).rounded() / 10
+            if before.megabytes > 0 { after.mbps = (before.mbps * after.megabytes / before.megabytes * 10).rounded() / 10 }
+            return (before, after)
+        }
+        // Inflate adds filler samples on purpose, so its frame count is not compared.
         let addsFillers = method == .inflate || method == .silent
         let after = try await info(of: dst, countingFrames: !addsFillers)
         var bad: [String] = []

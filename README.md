@@ -40,7 +40,7 @@ python pc/tiktok_prep.py --method all hike.mov hike.mp4   # writes hike_silent /
   bitrate box fixed, metadata removed. Written from the published description of
   AscendedTweaks/silent-method; tests/ checks it gives the same bytes as that tool.
 - `mvhd`: the movie header set to the longest duration (the original method here).
-- `inflate`: NoBlur style, tiny filler video samples so the file reads as very high density.
+- `inflate`: NoBlur style, tiny filler video samples so the file reads as very high density. Not recommended: each filler takes a frame's time, so the video track runs ~5x longer than the clip and TikTok can turn it into slow motion.
 - `fps`: a 60 fps clip reads as 30 fps (120 reads as 30), so TikTok keeps every frame.
 
 To see the real result, open the posted video in the app's TikTok tab and tap ⋯ → Check video quality

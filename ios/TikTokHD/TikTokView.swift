@@ -12,7 +12,7 @@ import WebKit
 final class Browser: NSObject, ObservableObject, WKNavigationDelegate, WKUIDelegate {
     static let home = URL(string: "https://www.tiktok.com/login")!
     static let studio = URL(string: "https://www.tiktok.com/tiktokstudio/upload")!
-    static let macUA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15"
+    static let macUA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.1 Safari/605.1.15"
 
     /// Runs before TikTok's own code in every frame (desktop mode only).
     static let desktopJS = """
@@ -67,6 +67,14 @@ final class Browser: NSObject, ObservableObject, WKNavigationDelegate, WKUIDeleg
     @Published var status: String?
     private var injecting = false
     private var started = false
+    /// What made the page load again (shown in ⋯ → Page report), newest last.
+    private var events: [String] = []
+
+    private func note(_ s: String) {
+        let t = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
+        events.append("\(t) \(s)")
+        if events.count > 12 { events.removeFirst(events.count - 12) }
+    }
 
     override init() {
         let cfg = WKWebViewConfiguration()
@@ -114,6 +122,7 @@ final class Browser: NSObject, ObservableObject, WKNavigationDelegate, WKUIDeleg
     func openStudio() { open(Self.studio) }
 
     private func reloadInMode(_ d: Bool) {
+        note("reloaded as \(d ? "desktop" : "mobile") site: \(web.url?.path ?? "-")")
         apply(desktop: d)
         if let u = web.url { _ = web.load(URLRequest(url: u)) }
     }
@@ -135,6 +144,7 @@ final class Browser: NSObject, ObservableObject, WKNavigationDelegate, WKUIDeleg
         if main, let url = action.request.url, action.request.httpMethod ?? "GET" == "GET",
            wantsDesktop(url) != desktop {
             let d = wantsDesktop(url)
+            note("link opened as \(d ? "desktop" : "mobile") site: \(url.path)")
             DispatchQueue.main.async {
                 self.apply(desktop: d)
                 _ = self.web.load(URLRequest(url: url))
@@ -146,6 +156,17 @@ final class Browser: NSObject, ObservableObject, WKNavigationDelegate, WKUIDeleg
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { update() }
+
+    /// iOS ended the page's process, almost always because it used too much memory
+    /// (a big video in the upload box, TikTok making its cover from a 4K/HDR file).
+    /// Left to itself WebKit reloads the page without a word and the upload is gone;
+    /// here the page is reloaded too, but the user is told why.
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        note("page crashed (iOS ended it, usually out of memory) on \(webView.url?.path ?? "-")")
+        injecting = false
+        status = "TikTok's page crashed: iOS ended it, most likely out of memory with this big video, so the upload was lost. Try again with the app freshly opened, or post a shorter or smaller file. (Tap to hide.)"
+        if let u = webView.url { _ = webView.load(URLRequest(url: u)) } else { open(Self.studio) }
+    }
     func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) { update() }
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) { update() }
 
@@ -448,10 +469,11 @@ final class Browser: NSObject, ObservableObject, WKNavigationDelegate, WKUIDeleg
           'text: ' + (document.body ? document.body.innerText.replace(/\\s+/g, ' ').slice(0, 300) : '-')
         ].join('\\n');
         """
+        let log = "\n\npage loads by the app:\n" + (events.isEmpty ? "(none)" : events.joined(separator: "\n"))
         do {
-            return (try await js(body)) as? String ?? "(no answer)"
+            return ((try await js(body)) as? String ?? "(no answer)") + log
         } catch {
-            return "error: \(error.localizedDescription)\nurl: \(web.url?.absoluteString ?? "-")"
+            return "error: \(error.localizedDescription)\nurl: \(web.url?.absoluteString ?? "-")" + log
         }
     }
 
