@@ -360,6 +360,8 @@ def _patch_and_report(method, patch, src, dst, a, codec):
         print("[ok] picture data untouched, same codec, size and HDR")
         print("Upload in TikTok Studio in a desktop browser with 'Allow high-quality uploads' on.")
         print("Post as 'Only me' first and check each version; TikTok changes this often.")
+        print("If an 'Only me' post comes out soft, try a public one: some method authors say")
+        print("private posts get compressed. Never add a TikTok sound, trim or filter while posting.")
         print("Your PC player may show a wrong length or speed for these files: that's expected.")
         for o in outputs:
             print(f"\n  {o}")
