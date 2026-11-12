@@ -313,6 +313,28 @@ def main():
     if a["fps"] < 59:
         print(f"[warn] input is {a['fps']:.2f} fps, not 60: export 60 fps from your editor first")
 
+    prepared = None
+    if opts["prepare"]:
+        prepared = dst.with_name(dst.stem + ".prepared.mp4")
+        if prepared.resolve() == src.resolve():
+            sys.exit("[!] output must be a different file")
+        print("--prepare: re-encoding (this is the slow part)...")
+        if any("DOVI" in x for x in a["side"]):
+            print("[warn] Dolby Vision is lost by --prepare (plain HDR is kept)")
+        frames = a["frames"]
+        prepare(src, prepared, a, opts["codec"], opts["crf"], opts["to1080"], opts["clean"])
+        src, a = prepared, probe(prepared)
+        print("prepared:", describe(a))
+        if frames and abs(a["frames"] - frames) > max(2, frames * 0.02):
+            print(f"[note] the source had an uneven frame rate: {frames} frames became {a['frames']}")
+    try:
+        _patch_and_report(method, patch, src, dst, a, codec=a["codec_name"])
+    finally:
+        if prepared:
+            prepared.unlink(missing_ok=True)
+
+
+def _patch_and_report(method, patch, src, dst, a, codec):
     if method:
         names = METHODS if method == "all" else (method,)
         outputs = []
